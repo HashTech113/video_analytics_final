@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import {
   LineChart,
   Line,
@@ -7,6 +8,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import { API_BASE_URL } from "@/config/env";
 
 interface HourlyAnalyticsEntry {
   hour?: string;
@@ -34,6 +36,9 @@ interface HourlyAnalyticsChartProps {
 interface ProcessedVideoPanelProps {
   videoUrl?: string;
   videoName?: string;
+  liveStreamUrl?: string;
+  liveCameraName?: string;
+  liveCameraId?: string;
 }
 
 export function HourlyAnalyticsChart({
@@ -100,20 +105,122 @@ export function HourlyAnalyticsChart({
   );
 }
 
-export function ProcessedVideoPanel({ videoUrl, videoName }: ProcessedVideoPanelProps) {
+export function ProcessedVideoPanel({
+  videoUrl,
+  videoName,
+  liveStreamUrl,
+  liveCameraName,
+  liveCameraId,
+}: ProcessedVideoPanelProps) {
+  const isLive = Boolean(liveStreamUrl);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [webrtcReady, setWebrtcReady] = useState(false);
+  const [webrtcFailed, setWebrtcFailed] = useState(false);
+
+  useEffect(() => {
+    if (!isLive || !liveCameraId) {
+      setWebrtcReady(false);
+      setWebrtcFailed(false);
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+      return;
+    }
+
+    let disposed = false;
+    const pc = new RTCPeerConnection();
+    setWebrtcReady(false);
+    setWebrtcFailed(false);
+
+    const setup = async () => {
+      try {
+        pc.addTransceiver("video", { direction: "recvonly" });
+        pc.ontrack = (event) => {
+          if (disposed || !videoRef.current) return;
+          const [stream] = event.streams;
+          videoRef.current.srcObject = stream;
+          setWebrtcReady(true);
+        };
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        const response = await fetch(`${API_BASE_URL}/api/cameras/${liveCameraId}/webrtc-offer`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            sdp: offer.sdp,
+            type: offer.type,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error("WebRTC signaling failed.");
+        }
+
+        const payload = await response.json();
+        const answer = payload?.data;
+        if (!answer?.sdp || !answer?.type) {
+          throw new Error("Invalid WebRTC answer payload.");
+        }
+
+        await pc.setRemoteDescription(answer);
+      } catch {
+        if (!disposed) {
+          setWebrtcReady(false);
+          setWebrtcFailed(true);
+        }
+      }
+    };
+
+    setup();
+
+    return () => {
+      disposed = true;
+      const stream = videoRef.current?.srcObject as MediaStream | null;
+      stream?.getTracks().forEach((track) => track.stop());
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+      pc.close();
+    };
+  }, [isLive, liveCameraId]);
+
   return (
     <div className="bg-card rounded-lg border border-border p-5 animate-fade-in">
-      <h3 className="text-sm font-semibold mb-4">Processed Video</h3>
-      {videoUrl ? (
+      <h3 className="text-sm font-semibold mb-4">{isLive ? "Live Stream" : "Processed Video"}</h3>
+      {liveStreamUrl ? (
+        <div className="rounded-md overflow-hidden bg-black">
+          {webrtcReady ? (
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-[280px] object-contain"
+            />
+          ) : webrtcFailed ? (
+            <img src={liveStreamUrl} alt={liveCameraName || "Live stream"} className="w-full h-[280px] object-contain" />
+          ) : (
+            <div className="w-full h-[280px] grid place-items-center text-sm text-muted-foreground">
+              Connecting live stream...
+            </div>
+          )}
+        </div>
+      ) : videoUrl ? (
         <div className="rounded-md overflow-hidden bg-black">
           <video src={videoUrl} controls className="w-full h-[280px] object-contain" />
         </div>
       ) : (
         <div className="h-[280px] rounded-md border border-dashed border-border grid place-items-center text-sm text-muted-foreground px-4 text-center">
-          Click View on a processed record to preview the video here.
+          Click View on a processed or live-stream record to preview here.
         </div>
       )}
-      {videoName && <p className="text-xs text-muted-foreground mt-3 truncate">{videoName}</p>}
+      {(isLive ? liveCameraName : videoName) && (
+        <p className="text-xs text-muted-foreground mt-3 truncate">{isLive ? liveCameraName : videoName}</p>
+      )}
     </div>
   );
 }

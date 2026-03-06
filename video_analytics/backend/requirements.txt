@@ -4,3 +4,5 @@ python-multipart
 ultralytics
 opencv-python
 numpy
+aiortc
+av

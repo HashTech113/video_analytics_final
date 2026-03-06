@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Upload, X, FileVideo, Loader2, CheckCircle, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { getUploadJobStatus, uploadVideo } from "@/lib/api";
 import { toast } from "@/hooks/use-toast";
@@ -29,14 +30,28 @@ function isSupportedVideoFile(file: File) {
   return file.type.startsWith("video/") || SUPPORTED_VIDEO_EXTENSIONS.includes(extension);
 }
 
+const USE_CASE_OPTIONS = [
+  { value: "person_count", label: "Person Count" },
+  { value: "person_recognition", label: "Person Recognition" },
+];
+
 export default function UploadVideo() {
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [processedVideoUrl, setProcessedVideoUrl] = useState<string | null>(null);
   const [processingProgress, setProcessingProgress] = useState(0);
   const [processingSeconds, setProcessingSeconds] = useState(0);
+  const [selectedUseCases, setSelectedUseCases] = useState<string[]>(["person_count"]);
   const processingStartTimeRef = useRef<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const toggleUseCase = (useCase: string) => {
+    setSelectedUseCases((prev) =>
+      prev.includes(useCase)
+        ? prev.filter((item) => item !== useCase)
+        : [...prev, useCase]
+    );
+  };
 
   useEffect(() => {
     if (!uploading) {
@@ -75,16 +90,25 @@ export default function UploadVideo() {
 
   const handleSubmit = async () => {
     if (!file) return;
+    if (selectedUseCases.length === 0) {
+      toast({
+        title: "Select at least one use case",
+        description: "Choose one or more use cases before submitting.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setProcessedVideoUrl(null);
     setProcessingProgress(0);
     setProcessingSeconds(0);
     processingStartTimeRef.current = Date.now();
     setUploading(true);
     try {
-      const response = await uploadVideo(file);
+      const response = await uploadVideo(file, selectedUseCases);
       toast({
         title: "Upload accepted",
-        description: `Processing started (sampling every ${response.frame_stride} frame(s)).`,
+        description: `Processing started for ${selectedUseCases.join(", ")}.`,
       });
 
       while (true) {
@@ -196,6 +220,9 @@ export default function UploadVideo() {
                   <p className="text-sm text-muted-foreground">
                     Video analysis is complete and the output has been generated successfully.
                   </p>
+                  <p className="text-sm text-muted-foreground">
+                    Use cases: {selectedUseCases.join(", ")}
+                  </p>
                   <p className="text-sm font-medium">Processing time: {processingSeconds}s</p>
                   <Button onClick={clearFile} className="gap-2">
                     <RotateCcw className="w-4 h-4" />
@@ -221,6 +248,31 @@ export default function UploadVideo() {
             </>
           ) : (
             <div className="space-y-3">
+              <Card className="border-border">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base">Select Use Case</CardTitle>
+                </CardHeader>
+                <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {USE_CASE_OPTIONS.map((useCase) => {
+                    const checked = selectedUseCases.includes(useCase.value);
+                    return (
+                      <label
+                        key={useCase.value}
+                        className="flex items-center gap-2 rounded-md border border-border p-2 text-sm cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleUseCase(useCase.value)}
+                          disabled={uploading}
+                        />
+                        <Label className="cursor-pointer">{useCase.label}</Label>
+                      </label>
+                    );
+                  })}
+                </CardContent>
+              </Card>
+
               <div className="flex gap-3">
                 <Button onClick={handleSubmit} disabled={uploading} className="gap-2">
                   {uploading ? (

@@ -3,6 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes.analytics import router as analytics_router
+from app.api.routes.cameras import router as cameras_router
+from app.api.routes.cameras import recover_interrupted_live_recordings
+from app.api.routes.cameras import resume_live_camera_recordings
+from app.api.routes.cameras import stop_all_live_camera_recordings
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.uploads import router as uploads_router
 from app.api.routes.videos import router as videos_router
@@ -18,7 +22,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=CORS_ALLOW_ORIGINS,
-        allow_credentials=False,
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -28,6 +32,16 @@ def create_app() -> FastAPI:
     app.include_router(jobs_router)
     app.include_router(analytics_router)
     app.include_router(videos_router)
+    app.include_router(cameras_router)
+
+    @app.on_event("startup")
+    async def on_startup():
+        recover_interrupted_live_recordings()
+        resume_live_camera_recordings()
+
+    @app.on_event("shutdown")
+    async def on_shutdown():
+        stop_all_live_camera_recordings()
 
     return app
 

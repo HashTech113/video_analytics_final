@@ -57,3 +57,17 @@ coverage/
 *.coverage
 .coverage*
 htmlcov/
+
+# TypeScript / bundlers
+*.tsbuildinfo
+.parcel-cache/
+
+# Notebook / local data artifacts
+.ipynb_checkpoints/
+backend/dataset/
+
+# Binary/media artifacts
+*.mp4
+*.avi
+*.mov
+*.mkv

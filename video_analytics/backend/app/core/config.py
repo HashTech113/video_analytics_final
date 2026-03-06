@@ -38,3 +38,12 @@ SUPPORTED_VIDEO_EXTENSIONS = {
     ".ts",
     ".m2ts",
 }
+
+SUPPORTED_USE_CASES = {
+    "person_count",
+    "person_recognition",
+}
+
+EXECUTABLE_VIDEO_USE_CASES = {
+    "person_count",
+}

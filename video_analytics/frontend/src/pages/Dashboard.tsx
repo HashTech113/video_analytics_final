@@ -1,14 +1,19 @@
-import { Video, Users, Eye, Download } from "lucide-react";
+import { Download, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { StatCard } from "@/components/StatCard";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { HourlyAnalyticsChart, ProcessedVideoPanel } from "@/components/AnalyticsCharts";
-import { RecentUploadsTable } from "@/components/RecentUploadsTable";
 import {
+  deleteConnectedCamera,
   deleteVideo,
   downloadReport,
   getAnalytics,
+  getConnectedCamera,
+  getConnectedCameras,
   getVideoDetails,
   type AnalyticsData,
+  type ConnectedCamera,
   type VideoDetails,
 } from "@/lib/api";
 import { toBackendAssetUrl } from "@/lib/http";
@@ -17,6 +22,7 @@ import { useEffect, useMemo, useState } from "react";
 
 interface SelectedVideoHourlyEntry {
   second: number;
+  detections: number;
   personCount: number;
   uploads: number;
 }
@@ -28,6 +34,12 @@ interface SelectedVideoTimeline {
   ticks: number[];
   endSecond: number;
   granularity: TimelineGranularity;
+}
+
+interface SelectedCameraPreview {
+  id: string;
+  cameraName: string;
+  streamUrl: string;
 }
 
 function pickBucketSizeSeconds(durationSeconds: number): { bucketSizeSeconds: number; granularity: TimelineGranularity } {
@@ -99,6 +111,7 @@ function buildSelectedVideoTimeline(video: VideoDetails): SelectedVideoTimeline 
     .sort((a, b) => a[0] - b[0])
     .map(([second, bucket]) => ({
       second,
+      detections: bucket.count > 0 ? Math.round(bucket.sum / bucket.count) : 0,
       personCount: bucket.count > 0 ? Math.round(bucket.sum / bucket.count) : 0,
       uploads: 1,
     }));
@@ -152,21 +165,37 @@ function formatProcessingTime(seconds?: number): string {
 
 export default function Dashboard() {
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
+  const [connectedCameras, setConnectedCameras] = useState<ConnectedCamera[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedVideo, setSelectedVideo] = useState<VideoDetails | null>(null);
+  const [selectedCameraPreview, setSelectedCameraPreview] = useState<SelectedCameraPreview | null>(null);
+  const [selectedLiveCamera, setSelectedLiveCamera] = useState<ConnectedCamera | null>(null);
+  const [cameraSearch, setCameraSearch] = useState("");
+  const [selectedDate, setSelectedDate] = useState("");
+  const [selectedSearchCameraId, setSelectedSearchCameraId] = useState<string | null>(null);
+  const [isSearchExpanded, setIsSearchExpanded] = useState(false);
+  const [liveCameraSeries, setLiveCameraSeries] = useState<SelectedVideoHourlyEntry[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingCameraId, setDeletingCameraId] = useState<string | null>(null);
   const hasViewedVideo = selectedVideo !== null;
+  const hasViewedLiveCamera = selectedCameraPreview !== null;
 
   const fetchAnalytics = async () => {
     try {
-      const response = await getAnalytics();
-      response.data.recent_uploads = response.data.recent_uploads.map((upload) => ({
+      const [analyticsResponse, camerasResponse] = await Promise.all([
+        getAnalytics(),
+        getConnectedCameras(),
+      ]);
+
+      analyticsResponse.data.recent_uploads = analyticsResponse.data.recent_uploads.map((upload) => ({
         ...upload,
         processedVideo: upload.processedVideo && !upload.processedVideo.startsWith("http")
           ? toBackendAssetUrl(upload.processedVideo)
           : upload.processedVideo,
+        useCases: upload.useCases ?? upload.use_cases ?? [],
       }));
-      setAnalytics(response.data);
+      setAnalytics(analyticsResponse.data);
+      setConnectedCameras(camerasResponse);
     } catch {
       toast({
         title: "Analytics unavailable",
@@ -208,6 +237,9 @@ export default function Dashboard() {
       if (details.processedVideo && !details.processedVideo.startsWith("http")) {
         details.processedVideo = toBackendAssetUrl(details.processedVideo);
       }
+      setSelectedCameraPreview(null);
+      setSelectedLiveCamera(null);
+      setLiveCameraSeries([]);
       setSelectedVideo(details);
     } catch {
       toast({
@@ -238,9 +270,98 @@ export default function Dashboard() {
     }
   };
 
+  const handleViewCamera = async (cameraId: string) => {
+    try {
+      const camera = await getConnectedCamera(cameraId);
+      setSelectedVideo(null);
+      setSelectedLiveCamera(camera);
+      setLiveCameraSeries([]);
+      setSelectedCameraPreview({
+        id: cameraId,
+        cameraName: camera.camera_name || camera.host || cameraId,
+        streamUrl: toBackendAssetUrl(`/api/cameras/${cameraId}/stream`),
+      });
+      toast({
+        title: camera.camera_name || "Connected camera",
+        description: `${camera.host || "N/A"}:${camera.port || "N/A"} (${camera.status || "connected"})`,
+      });
+    } catch {
+      toast({
+        title: "Unable to load camera details",
+        description: "Could not fetch details for this camera.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleDeleteCamera = async (cameraId: string) => {
+    setDeletingCameraId(cameraId);
+    try {
+      await deleteConnectedCamera(cameraId);
+      if (selectedCameraPreview?.id === cameraId) {
+        setSelectedCameraPreview(null);
+        setSelectedLiveCamera(null);
+        setLiveCameraSeries([]);
+      }
+      await fetchAnalytics();
+      toast({ title: "Camera removed successfully" });
+    } catch {
+      toast({
+        title: "Delete failed",
+        description: "Could not remove this camera.",
+        variant: "destructive",
+      });
+    } finally {
+      setDeletingCameraId(null);
+    }
+  };
+
   const selectedVideoTimeline = useMemo(
     () => (selectedVideo ? buildSelectedVideoTimeline(selectedVideo) : null),
     [selectedVideo],
+  );
+
+  useEffect(() => {
+    if (!selectedCameraPreview?.id) {
+      return;
+    }
+
+    let cancelled = false;
+    setLiveCameraSeries([]);
+    const intervalId = window.setInterval(async () => {
+      try {
+        const camera = await getConnectedCamera(selectedCameraPreview.id);
+        if (!cancelled) {
+          setSelectedLiveCamera(camera);
+          const currentCount = Number(camera.current_person_count ?? 0);
+          setLiveCameraSeries((prev) => {
+            const nextSecond = prev.length > 0 ? prev[prev.length - 1].second + 1 : 0;
+            const nextPoint: SelectedVideoHourlyEntry = {
+              second: nextSecond,
+              detections: currentCount,
+              personCount: currentCount,
+              uploads: 1,
+            };
+            const next = [...prev, nextPoint];
+            return next.length > 180 ? next.slice(next.length - 180) : next;
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setSelectedLiveCamera(null);
+        }
+      }
+    }, 1000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [selectedCameraPreview?.id]);
+
+  const liveProcessingTime = useMemo(
+    () => formatProcessingTime(selectedLiveCamera?.processing_time_seconds),
+    [selectedLiveCamera?.processing_time_seconds],
   );
 
   const zeroedHourlyAnalytics = useMemo(
@@ -254,106 +375,296 @@ export default function Dashboard() {
   );
 
   const hourlyChartData = useMemo(
-    () => (selectedVideoTimeline ? selectedVideoTimeline.data : zeroedHourlyAnalytics),
-    [selectedVideoTimeline, zeroedHourlyAnalytics],
+    () => {
+      if (selectedVideoTimeline) {
+        return selectedVideoTimeline.data;
+      }
+      if (selectedLiveCamera && liveCameraSeries.length > 0) {
+        return liveCameraSeries;
+      }
+      return zeroedHourlyAnalytics;
+    },
+    [selectedVideoTimeline, selectedLiveCamera, liveCameraSeries, zeroedHourlyAnalytics],
   );
+
+  const liveChartEndSecond = useMemo(
+    () => (liveCameraSeries.length > 0 ? liveCameraSeries[liveCameraSeries.length - 1].second : 0),
+    [liveCameraSeries],
+  );
+  const liveChartTicks = useMemo(
+    () => buildTimelineTicks(liveChartEndSecond, 5),
+    [liveChartEndSecond],
+  );
+
+  const selectedVideoUseCases = useMemo(() => {
+    if (!selectedVideo?.id) return [];
+    const match = analytics?.recent_uploads.find((upload) => upload.id === selectedVideo.id);
+    return match?.useCases ?? match?.use_cases ?? [];
+  }, [analytics?.recent_uploads, selectedVideo?.id]);
+
+  const selectedSummary = useMemo(() => {
+    if (selectedLiveCamera) {
+      return {
+        cameraName: selectedLiveCamera.camera_name || selectedLiveCamera.camera_id || "N/A",
+        cameraIp: selectedLiveCamera.host || "N/A",
+        date: (selectedLiveCamera.connected_at || selectedLiveCamera.updated_at || "").split("T")[0] || "N/A",
+        useCase: selectedLiveCamera.use_cases?.join(", ") || "N/A",
+        personCount: selectedLiveCamera.current_person_count ?? 0,
+        status: "Live Stream",
+      };
+    }
+
+    if (selectedVideo) {
+      const normalizedStatus = selectedVideo.status === "completed" ? "Processed Completed" : selectedVideo.status;
+      return {
+        cameraName: selectedVideo.videoName || "N/A",
+        cameraIp: "N/A",
+        date: (selectedVideo.uploadDate || "").split("T")[0] || "N/A",
+        useCase: selectedVideoUseCases.join(", ") || "N/A",
+        personCount: selectedVideo.personCount ?? 0,
+        status: normalizedStatus,
+      };
+    }
+
+    return {
+      cameraName: "N/A",
+      cameraIp: "N/A",
+      date: "N/A",
+      useCase: "N/A",
+      personCount: 0,
+      status: "N/A",
+    };
+  }, [selectedLiveCamera, selectedVideo, selectedVideoUseCases]);
+
+  const cameraSearchResults = useMemo(() => {
+    const query = cameraSearch.trim().toLowerCase();
+    if (!query) return [];
+    return connectedCameras.filter((camera) => {
+      const cameraDate = (camera.connected_at || camera.updated_at || "").split("T")[0] || "";
+      const matchesDate = !selectedDate || cameraDate === selectedDate;
+      const name = (camera.camera_name || "").toLowerCase();
+      const ip = (camera.host || "").toLowerCase();
+      return matchesDate && (name.includes(query) || ip.includes(query));
+    });
+  }, [cameraSearch, connectedCameras, selectedDate]);
+
+  useEffect(() => {
+    if (!selectedSearchCameraId) {
+      return;
+    }
+    const isStillPresent = cameraSearchResults.some((camera) => camera.camera_id === selectedSearchCameraId);
+    if (!isStillPresent) {
+      setSelectedSearchCameraId(null);
+    }
+  }, [cameraSearchResults, selectedSearchCameraId]);
+
+  const handleSearch = async () => {
+    const query = cameraSearch.trim();
+    if (!query) {
+      toast({
+        title: "Search term required",
+        description: "Enter a camera name or IP address.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    let cameraIdToOpen = selectedSearchCameraId;
+    if (!cameraIdToOpen && cameraSearchResults.length === 1) {
+      cameraIdToOpen = cameraSearchResults[0].camera_id;
+      setSelectedSearchCameraId(cameraIdToOpen);
+    }
+    if (!cameraIdToOpen) {
+      toast({
+        title: "Select a camera",
+        description: "Choose one camera from search results, then click Search.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    await handleViewCamera(cameraIdToOpen);
+  };
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
-          <p className="text-sm text-muted-foreground mt-1">Video analytics overview</p>
         </div>
-        <Button onClick={handleDownloadReport} className="gap-2">
-          <Download className="w-4 h-4" />
-          Download Report
-        </Button>
+        <div className="flex items-center gap-2 justify-end">
+          <div
+            className={`overflow-hidden transition-all duration-300 ease-out ${
+              isSearchExpanded ? "max-w-[680px] opacity-100 translate-x-0" : "max-w-0 opacity-0 -translate-x-2 pointer-events-none"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <Input
+                id="analytics-header-search"
+                type="text"
+                placeholder="Search Camera (Name/IP)"
+                value={cameraSearch}
+                onChange={(e) => {
+                  setCameraSearch(e.target.value);
+                  setSelectedSearchCameraId(null);
+                }}
+                className="w-[240px]"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void handleSearch();
+                  }
+                }}
+              />
+              <Input
+                id="analytics-header-search-date"
+                type="date"
+                value={selectedDate}
+                onChange={(e) => {
+                  setSelectedDate(e.target.value);
+                  setSelectedSearchCameraId(null);
+                }}
+                className="w-[170px]"
+              />
+              <Button onClick={() => void handleSearch()}>Search</Button>
+            </div>
+          </div>
+          <Button
+            type="button"
+            variant={isSearchExpanded ? "default" : "outline"}
+            size="icon"
+            onClick={() => setIsSearchExpanded((prev) => !prev)}
+            aria-label="Toggle search options"
+            title="Search"
+          >
+            <Search className="w-4 h-4" />
+          </Button>
+          <Button onClick={handleDownloadReport} className="gap-2">
+            <Download className="w-4 h-4" />
+            Download Report
+          </Button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard
-          title="Total Videos"
-          value={loading ? "..." : (analytics?.total_videos ?? 0)}
-          change={loading ? "Loading" : "From processed uploads"}
-          changeType="neutral"
-          icon={Video}
-        />
-        <StatCard
-          title="Processing Time"
-          value={loading ? "..." : hasViewedVideo ? formatProcessingTime(selectedVideo?.details.duration_seconds) : "0s"}
-          change={loading ? "Loading" : hasViewedVideo ? `Processed for ${selectedVideo?.videoName}` : "Click View to show analytics"}
-          changeType="positive"
-          icon={Users}
-        />
-        <StatCard
-          title="Total Person Count"
-          value={loading ? "..." : (hasViewedVideo ? (selectedVideo?.personCount ?? 0) : 0)}
-          change={
-            loading
-              ? "Loading"
-              : hasViewedVideo && selectedVideo
-                ? `Detected in ${selectedVideo.videoName}`
-                : "Click View to show analytics"
-          }
-          changeType="neutral"
-          icon={Users}
-        />
-        <StatCard
-          title="Total Frames"
-          value={loading ? "..." : (selectedVideo?.details.total_frames ?? 0)}
-          change={
-            loading
-              ? "Loading"
-              : selectedVideo
-                ? `Captured while processing ${selectedVideo.videoName}`
-                : "Select a video to view processed frame count"
-          }
-          changeType="positive"
-          icon={Eye}
-        />
-      </div>
+      {isSearchExpanded && cameraSearch.trim().length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Search Results</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {cameraSearchResults.length > 0 ? (
+              cameraSearchResults.map((camera) => {
+                const isSelected = selectedSearchCameraId === camera.camera_id;
+                return (
+                  <button
+                    key={camera.camera_id}
+                    type="button"
+                    className={`flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-sm ${
+                      isSelected ? "border-primary bg-primary/10" : "border-border hover:bg-muted"
+                    }`}
+                    onClick={() => setSelectedSearchCameraId(camera.camera_id)}
+                  >
+                    <span className="font-medium">{camera.camera_name || camera.camera_id}</span>
+                    <span className="text-muted-foreground">{camera.host || "N/A"}</span>
+                  </button>
+                );
+              })
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                No matching cameras found.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Selected Stream/Video Data</CardTitle>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="rounded-md border p-3">
+            <p className="text-xs text-muted-foreground">Camera Name</p>
+            <p className="text-sm font-medium break-words">{selectedSummary.cameraName}</p>
+          </div>
+          <div className="rounded-md border p-3">
+            <p className="text-xs text-muted-foreground">Camera IP</p>
+            <p className="text-sm font-medium break-words">{selectedSummary.cameraIp}</p>
+          </div>
+          <div className="rounded-md border p-3">
+            <p className="text-xs text-muted-foreground">Date</p>
+            <p className="text-sm font-medium">{selectedSummary.date}</p>
+          </div>
+          <div className="rounded-md border p-3">
+            <p className="text-xs text-muted-foreground">Use Case</p>
+            <p className="text-sm font-medium break-words">{selectedSummary.useCase}</p>
+          </div>
+          <div className="rounded-md border p-3">
+            <p className="text-xs text-muted-foreground">Person Count</p>
+            <p className="text-sm font-medium">{selectedSummary.personCount}</p>
+          </div>
+          <div className="rounded-md border p-3">
+            <p className="text-xs text-muted-foreground">Status</p>
+            <p className="text-sm font-medium">{selectedSummary.status}</p>
+          </div>
+        </CardContent>
+      </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <HourlyAnalyticsChart
           data={hourlyChartData}
-          title={selectedVideo ? `Hourly Analytics (${selectedVideo.videoName})` : "Hourly Analytics"}
+          title={
+            selectedVideo
+              ? `Hourly Analytics (${selectedVideo.videoName})`
+              : selectedLiveCamera
+                ? `Live Person Count (${selectedSummary.cameraName})`
+                : "Hourly Analytics"
+          }
           xAxisLabel={
             selectedVideoTimeline
               ? `Video Timeline (${selectedVideoTimeline.granularity})`
-              : "Duration"
+              : selectedLiveCamera
+                ? "Live Timeline (seconds)"
+                : "Duration"
           }
-          xDataKey={selectedVideo ? "second" : "hour"}
-          xAxisType={selectedVideo ? "number" : "category"}
-          xTicks={selectedVideoTimeline?.ticks}
-          xAxisInterval={selectedVideo ? "preserveEnd" : "preserveEnd"}
-          xDomain={selectedVideoTimeline ? [0, selectedVideoTimeline.endSecond] : undefined}
+          xDataKey={selectedVideo || selectedLiveCamera ? "second" : "hour"}
+          xAxisType={selectedVideo || selectedLiveCamera ? "number" : "category"}
+          xTicks={selectedVideoTimeline ? selectedVideoTimeline.ticks : selectedLiveCamera ? liveChartTicks : undefined}
+          xAxisInterval="preserveEnd"
+          xDomain={
+            selectedVideoTimeline
+              ? [0, selectedVideoTimeline.endSecond]
+              : selectedLiveCamera
+                ? [0, liveChartEndSecond]
+                : undefined
+          }
           xTickFormatter={
             selectedVideoTimeline
               ? (value) => formatTimelineTick(Number(value), selectedVideoTimeline.granularity)
+              : selectedLiveCamera
+                ? (value) => `${Math.round(Number(value))}s`
               : undefined
           }
           tooltipLabelFormatter={
             selectedVideoTimeline
               ? (value) => formatTimelineTooltip(Number(value) || 0, selectedVideoTimeline.granularity)
+              : selectedLiveCamera
+                ? (value) => `Second ${Math.round(Number(value) || 0)}`
               : undefined
           }
-          yDataKey={selectedVideo ? "personCount" : "detections"}
-          yAxisLabel={selectedVideo ? "Person Count" : "Counts"}
-          lineName={selectedVideo ? "Person Count" : "Count"}
+          yDataKey={selectedVideo || selectedLiveCamera ? "personCount" : "detections"}
+          yAxisLabel={selectedVideo || selectedLiveCamera ? "Person Count" : "Counts"}
+          lineName={selectedVideo || selectedLiveCamera ? "Person Count" : "Count"}
         />
         <ProcessedVideoPanel
+          liveCameraId={selectedCameraPreview?.id}
+          liveStreamUrl={selectedCameraPreview?.streamUrl}
+          liveCameraName={selectedCameraPreview?.cameraName}
           videoUrl={selectedVideo?.processedVideo}
           videoName={selectedVideo?.videoName}
         />
       </div>
 
-      <RecentUploadsTable
-        uploads={analytics?.recent_uploads ?? []}
-        onView={handleViewVideo}
-        onDelete={handleDeleteVideo}
-        deletingId={deletingId}
-      />
     </div>
   );
 }

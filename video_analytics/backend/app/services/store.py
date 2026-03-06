@@ -8,20 +8,54 @@ import os
 
 from fastapi import UploadFile
 
-from app.core.config import ANALYTICS_STORE, OUTPUT_DIR, SUPPORTED_VIDEO_EXTENSIONS
+from app.core.config import ANALYTICS_STORE, OUTPUT_DIR, SUPPORTED_USE_CASES, SUPPORTED_VIDEO_EXTENSIONS
 
 
 records_lock = RLock()
 jobs_lock = RLock()
+camera_lock = RLock()
 JOBS: dict[str, dict] = {}
+CONNECTED_CAMERAS: dict[str, dict] = {}
 
 
 OUTPUT_DIR_STR = str(OUTPUT_DIR)
 ANALYTICS_STORE_STR = str(ANALYTICS_STORE)
+CONNECTED_CAMERAS_STORE_STR = os.path.join(OUTPUT_DIR_STR, "connected_cameras.json")
 
 
 def ensure_storage_dirs() -> None:
     Path(OUTPUT_DIR_STR).mkdir(parents=True, exist_ok=True)
+    _load_connected_cameras_from_disk()
+
+
+def _load_connected_cameras_from_disk() -> None:
+    with camera_lock:
+        if not os.path.exists(CONNECTED_CAMERAS_STORE_STR):
+            CONNECTED_CAMERAS.clear()
+            return
+
+        try:
+            with open(CONNECTED_CAMERAS_STORE_STR, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            CONNECTED_CAMERAS.clear()
+            return
+
+        if isinstance(data, dict):
+            CONNECTED_CAMERAS.clear()
+            for camera_id, camera in data.items():
+                if isinstance(camera, dict):
+                    camera_copy = dict(camera)
+                    camera_copy["camera_id"] = camera_copy.get("camera_id") or camera_id
+                    CONNECTED_CAMERAS[camera_copy["camera_id"]] = camera_copy
+            return
+
+        CONNECTED_CAMERAS.clear()
+
+
+def _save_connected_cameras_to_disk() -> None:
+    with open(CONNECTED_CAMERAS_STORE_STR, "w", encoding="utf-8") as f:
+        json.dump(CONNECTED_CAMERAS, f, ensure_ascii=True, indent=2)
 
 
 def load_analytics_records():
@@ -97,6 +131,51 @@ def get_job_state(job_id):
 def pop_job_state(job_id):
     with jobs_lock:
         JOBS.pop(job_id, None)
+
+
+def set_connected_camera(camera_id: str, **camera_data):
+    with camera_lock:
+        current = CONNECTED_CAMERAS.get(camera_id, {"camera_id": camera_id})
+        current.update(camera_data)
+        current["updated_at"] = datetime.utcnow().isoformat()
+        CONNECTED_CAMERAS[camera_id] = current
+        _save_connected_cameras_to_disk()
+        return dict(current)
+
+
+def list_connected_cameras():
+    with camera_lock:
+        return [dict(camera) for camera in CONNECTED_CAMERAS.values()]
+
+
+def get_connected_camera(camera_id: str):
+    with camera_lock:
+        camera = CONNECTED_CAMERAS.get(camera_id)
+        return dict(camera) if camera else None
+
+
+def delete_connected_camera(camera_id: str):
+    with camera_lock:
+        deleted = CONNECTED_CAMERAS.pop(camera_id, None) is not None
+        if deleted:
+            _save_connected_cameras_to_disk()
+        return deleted
+
+
+def normalize_use_cases(use_cases):
+    if not use_cases:
+        return []
+
+    normalized = []
+    for raw in use_cases:
+        value = (raw or "").strip().lower().replace(" ", "_")
+        if value and value not in normalized:
+            normalized.append(value)
+    return normalized
+
+
+def get_unsupported_use_cases(use_cases):
+    return [use_case for use_case in use_cases if use_case not in SUPPORTED_USE_CASES]
 
 
 def is_supported_video_upload(file: UploadFile):
@@ -181,6 +260,9 @@ def build_analytics_payload():
     for r in reversed(records[-10:]):
         created_at = r.get("created_at", "")
         upload_date = created_at.split("T")[0] if "T" in created_at else created_at
+        details = (r.get("details", {}) or {})
+        requested_use_cases = details.get("requested_use_cases")
+        normalized_use_cases = normalize_use_cases(requested_use_cases if isinstance(requested_use_cases, list) else [])
         recent_uploads.append({
             "id": r.get("id", ""),
             "videoName": r.get("video_name", "unknown"),
@@ -189,13 +271,16 @@ def build_analytics_payload():
             "status": r.get("status", "completed"),
             "processedVideo": resolve_processed_video_path(r),
             "processingTimeSeconds": float((r.get("details", {}) or {}).get("duration_seconds") or 0),
+            "source": details.get("source", "upload_video"),
+            "useCases": normalized_use_cases,
+            "use_cases": normalized_use_cases,
         })
 
     return {
         "total_videos": total_videos,
         "total_persons": total_persons,
         "total_processing_time_seconds": total_processing_time_seconds,
-        "active_cameras": 1 if total_videos > 0 else 0,
+        "active_cameras": len(list_connected_cameras()),
         "todays_detections": todays_detections,
         "hourly_analytics": hourly_analytics,
         "person_count_per_video": person_count_per_video,

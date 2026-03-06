@@ -12,6 +12,7 @@ interface UploadResponse {
   job_id: string;
   status: "processing";
   frame_stride: number;
+  use_cases?: string[];
 }
 
 interface UploadJobStatus {
@@ -29,6 +30,32 @@ interface UploadJobStatus {
   started_at?: string;
   updated_at?: string;
   completed_at?: string;
+  requested_use_cases?: string[];
+  executed_use_cases?: string[];
+  skipped_use_cases?: string[];
+}
+
+interface CameraConnectResponse {
+  success?: boolean;
+  message?: string;
+  camera_id?: string;
+  stream_url?: string;
+  use_cases?: string[];
+}
+
+interface ConnectedCamera {
+  camera_id: string;
+  camera_name?: string;
+  host?: string;
+  port?: number;
+  status?: string;
+  use_cases?: string[];
+  connected_at?: string;
+  updated_at?: string;
+  current_person_count?: number;
+  total_person_count?: number;
+  total_frames?: number;
+  processing_time_seconds?: number;
 }
 
 interface AnalyticsData {
@@ -47,6 +74,9 @@ interface AnalyticsData {
     status: "completed" | "processing" | "failed";
     processedVideo?: string;
     processingTimeSeconds?: number;
+    source?: string;
+    useCases?: string[];
+    use_cases?: string[];
   }[];
 }
 
@@ -70,9 +100,10 @@ async function apiRequest<T>(endpoint: string, options?: RequestInit): Promise<A
   return requestJson<ApiResponse<T>>(endpoint, options);
 }
 
-export async function uploadVideo(file: File): Promise<UploadResponse> {
+export async function uploadVideo(file: File, useCases: string[]): Promise<UploadResponse> {
   const formData = new FormData();
   formData.append("file", file);
+  useCases.forEach((useCase) => formData.append("use_cases", useCase));
   return requestJson<UploadResponse>("/upload-video", {
     method: "POST",
     body: formData,
@@ -106,5 +137,47 @@ export async function deleteVideo(videoId: string): Promise<void> {
   });
 }
 
+export async function connectCameraRtsp(
+  rtspUrl: string,
+  cameraName?: string,
+  useCases: string[] = ["person_count"],
+): Promise<CameraConnectResponse> {
+  return requestJson<CameraConnectResponse>("/api/cameras/connect", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      rtsp_url: rtspUrl,
+      camera_name: cameraName?.trim() || undefined,
+      use_cases: useCases,
+    }),
+  });
+}
+
+export async function getConnectedCameras(): Promise<ConnectedCamera[]> {
+  const response = await apiRequest<ConnectedCamera[]>("/api/cameras");
+  return response.data ?? [];
+}
+
+export async function getConnectedCamera(cameraId: string): Promise<ConnectedCamera> {
+  const response = await apiRequest<ConnectedCamera>(`/api/cameras/${cameraId}`);
+  return response.data;
+}
+
+export async function deleteConnectedCamera(cameraId: string): Promise<void> {
+  await requestJson<{ success: boolean; message: string }>(`/api/cameras/${cameraId}`, {
+    method: "DELETE",
+  });
+}
+
 export { API_BASE_URL };
-export type { ApiResponse, UploadResponse, UploadJobStatus, AnalyticsData, VideoDetails };
+export type {
+  ApiResponse,
+  UploadResponse,
+  UploadJobStatus,
+  AnalyticsData,
+  VideoDetails,
+  CameraConnectResponse,
+  ConnectedCamera,
+};

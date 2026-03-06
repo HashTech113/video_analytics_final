@@ -1,101 +1,100 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-
 @layer base {
   :root {
-    --background: 220 20% 97%;
-    --foreground: 220 25% 10%;
+    --background: 42 12% 5%;
+    --foreground: 42 42% 88%;
 
-    --card: 0 0% 100%;
-    --card-foreground: 220 25% 10%;
+    --card: 42 14% 8%;
+    --card-foreground: 42 42% 88%;
 
-    --popover: 0 0% 100%;
-    --popover-foreground: 220 25% 10%;
+    --popover: 42 14% 8%;
+    --popover-foreground: 42 42% 88%;
 
-    --primary: 185 70% 42%;
-    --primary-foreground: 0 0% 100%;
+    --primary: 43 91% 56%;
+    --primary-foreground: 35 20% 8%;
 
-    --secondary: 220 15% 92%;
-    --secondary-foreground: 220 25% 10%;
+    --secondary: 42 12% 12%;
+    --secondary-foreground: 42 35% 84%;
 
-    --muted: 220 15% 94%;
-    --muted-foreground: 220 10% 50%;
+    --muted: 42 12% 10%;
+    --muted-foreground: 42 20% 62%;
 
-    --accent: 185 70% 42%;
-    --accent-foreground: 0 0% 100%;
+    --accent: 42 24% 14%;
+    --accent-foreground: 43 85% 72%;
 
-    --destructive: 0 72% 51%;
+    --destructive: 0 72% 48%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 220 15% 88%;
-    --input: 220 15% 88%;
-    --ring: 185 70% 42%;
+    --border: 42 28% 24%;
+    --input: 42 18% 14%;
+    --ring: 43 91% 56%;
 
     --radius: 0.5rem;
 
-    --sidebar-background: 220 25% 12%;
-    --sidebar-foreground: 220 10% 75%;
-    --sidebar-primary: 185 70% 50%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 220 20% 18%;
-    --sidebar-accent-foreground: 0 0% 95%;
-    --sidebar-border: 220 20% 20%;
-    --sidebar-ring: 185 70% 50%;
+    --sidebar-background: 42 14% 7%;
+    --sidebar-foreground: 42 22% 74%;
+    --sidebar-primary: 43 91% 56%;
+    --sidebar-primary-foreground: 35 20% 8%;
+    --sidebar-accent: 42 18% 12%;
+    --sidebar-accent-foreground: 42 40% 86%;
+    --sidebar-border: 42 28% 20%;
+    --sidebar-ring: 43 91% 56%;
 
-    --chart-1: 185 70% 50%;
-    --chart-2: 260 60% 55%;
-    --chart-3: 140 60% 45%;
-    --chart-4: 35 90% 55%;
-    --chart-5: 0 72% 55%;
+    --chart-1: 43 91% 56%;
+    --chart-2: 38 82% 48%;
+    --chart-3: 47 78% 62%;
+    --chart-4: 34 74% 40%;
+    --chart-5: 27 66% 34%;
 
-    --success: 140 60% 45%;
+    --success: 125 45% 46%;
     --success-foreground: 0 0% 100%;
-    --warning: 35 90% 55%;
-    --warning-foreground: 0 0% 10%;
-    --info: 205 80% 55%;
-    --info-foreground: 0 0% 100%;
+    --warning: 42 88% 56%;
+    --warning-foreground: 35 20% 8%;
+    --info: 42 70% 52%;
+    --info-foreground: 35 20% 8%;
   }
 
   .dark {
-    --background: 225 25% 8%;
-    --foreground: 210 20% 92%;
+    --background: 42 12% 5%;
+    --foreground: 42 42% 88%;
 
-    --card: 225 22% 11%;
-    --card-foreground: 210 20% 92%;
+    --card: 42 14% 8%;
+    --card-foreground: 42 42% 88%;
 
-    --popover: 225 22% 11%;
-    --popover-foreground: 210 20% 92%;
+    --popover: 42 14% 8%;
+    --popover-foreground: 42 42% 88%;
 
-    --primary: 185 70% 50%;
-    --primary-foreground: 220 30% 8%;
+    --primary: 43 91% 56%;
+    --primary-foreground: 35 20% 8%;
 
-    --secondary: 225 18% 16%;
-    --secondary-foreground: 210 20% 85%;
+    --secondary: 42 12% 12%;
+    --secondary-foreground: 42 35% 84%;
 
-    --muted: 225 18% 16%;
-    --muted-foreground: 220 10% 55%;
+    --muted: 42 12% 10%;
+    --muted-foreground: 42 20% 62%;
 
-    --accent: 225 18% 18%;
-    --accent-foreground: 210 20% 92%;
+    --accent: 42 24% 14%;
+    --accent-foreground: 43 85% 72%;
 
     --destructive: 0 62% 45%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 225 18% 18%;
-    --input: 225 18% 18%;
-    --ring: 185 70% 50%;
+    --border: 42 28% 24%;
+    --input: 42 18% 14%;
+    --ring: 43 91% 56%;
 
-    --sidebar-background: 225 28% 6%;
-    --sidebar-foreground: 220 10% 70%;
-    --sidebar-primary: 185 70% 50%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 225 22% 12%;
-    --sidebar-accent-foreground: 210 20% 92%;
-    --sidebar-border: 225 22% 14%;
-    --sidebar-ring: 185 70% 50%;
+    --sidebar-background: 42 14% 7%;
+    --sidebar-foreground: 42 22% 74%;
+    --sidebar-primary: 43 91% 56%;
+    --sidebar-primary-foreground: 35 20% 8%;
+    --sidebar-accent: 42 18% 12%;
+    --sidebar-accent-foreground: 42 40% 86%;
+    --sidebar-border: 42 28% 20%;
+    --sidebar-ring: 43 91% 56%;
   }
 }
 
@@ -106,6 +105,10 @@
 
   body {
     @apply bg-background text-foreground font-sans antialiased;
+    background-image:
+      radial-gradient(1200px 420px at 0% 0%, hsl(43 91% 56% / 0.12), transparent 65%),
+      radial-gradient(900px 360px at 100% 100%, hsl(43 91% 56% / 0.08), transparent 60%),
+      linear-gradient(180deg, hsl(42 12% 6%), hsl(42 12% 4%));
   }
 }
 
@@ -115,15 +118,15 @@
   }
 
   .gradient-primary {
-    background: linear-gradient(135deg, hsl(185 70% 42%), hsl(205 80% 55%));
+    background: linear-gradient(135deg, hsl(43 91% 56%), hsl(38 82% 48%));
   }
 
   .gradient-card {
-    background: linear-gradient(135deg, hsl(var(--card)), hsl(var(--card) / 0.8));
+    background: linear-gradient(135deg, hsl(42 14% 10%), hsl(42 14% 7%));
   }
 
   .glow-primary {
-    box-shadow: 0 0 20px hsl(185 70% 50% / 0.15);
+    box-shadow: 0 0 24px hsl(43 91% 56% / 0.22);
   }
 
   .stat-shadow {
@@ -138,4 +141,27 @@
   .no-scrollbar::-webkit-scrollbar {
     display: none;
   }
+}
+
+.live-preview-container:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+}
+
+.live-preview-container:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+}
+
+.live-preview-container:fullscreen .live-preview-image,
+.live-preview-container:-webkit-full-screen .live-preview-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
