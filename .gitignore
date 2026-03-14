@@ -42,6 +42,8 @@ backend/.pytest_cache/
 # Backend generated files
 backend/uploads/
 backend/outputs/
+video_analytics/backend/uploads/
+video_analytics/backend/outputs/
 
 # Frontend
 node_modules/
@@ -50,6 +52,18 @@ frontend/dist/
 frontend/.vite/
 frontend/.cache/
 .eslintcache
+video_analytics/frontend/node_modules/
+video_analytics/frontend/dist/
+video_analytics/frontend/.vite/
+video_analytics/frontend/.cache/
+
+# Nested project virtualenv / env files
+video_analytics/backend/.venv/
+video_analytics/backend/venv/
+video_analytics/backend/.env
+video_analytics/backend/.env.*
+!video_analytics/backend/.env.example
+video_analytics/frontend/.env.local
 
 # Coverage / reports
 coverage/
