@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.routes.analytics import router as analytics_router
 from app.api.routes.cameras import router as cameras_router
-from app.api.routes.cameras import stop_all_live_camera_recordings
+from app.api.routes.cameras import stop_all_camera_streams
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.uploads import router as uploads_router
 from app.api.routes.videos import router as videos_router
@@ -34,7 +34,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def on_shutdown():
-        stop_all_live_camera_recordings()
+        stop_all_camera_streams()
 
     return app
 

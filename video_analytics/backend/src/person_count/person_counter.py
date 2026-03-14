@@ -1,8 +1,9 @@
 from dataclasses import dataclass
 import os
 import subprocess
-from time import monotonic
 import time
+from time import monotonic
+from typing import Any
 
 import cv2
 from ultralytics import YOLO
@@ -15,13 +16,29 @@ class TrackState:
     hits: int = 1
 
 
+@dataclass
+class PersonDetection:
+    bbox: list[int]
+    conf: float
+
+
 class PersonCounter:
-    def __init__(self, min_hits=3, max_idle_seconds=2.0):
+    """
+    Stateful unique-person counter based on tracker IDs.
+
+    Expected flow for live streams:
+    1) detect persons (YOLO)
+    2) track persons (ByteTrack/other tracker)
+    3) count unique IDs here
+    4) draw tracked boxes every frame
+    """
+
+    def __init__(self, min_hits: int = 3, max_idle_seconds: float = 2.0):
         self.min_hits = min_hits
         self.max_idle_seconds = max_idle_seconds
 
-        self.track_states = {}
-        self.confirmed_ids = set()
+        self.track_states: dict[int, TrackState] = {}
+        self.confirmed_ids: set[int] = set()
         self.total_entered = 0
 
     def reset(self):
@@ -29,16 +46,20 @@ class PersonCounter:
         self.confirmed_ids.clear()
         self.total_entered = 0
 
-    def update(self, tracks):
+    def update(self, tracks: list[Any]):
         now = monotonic()
-        visible_ids = []
+        visible_ids: list[int] = []
+        visible_id_set: set[int] = set()
 
         for track in tracks:
             track_id = getattr(track, "track_id", None)
             if track_id is None:
                 continue
 
-            visible_ids.append(track_id)
+            track_id = int(track_id)
+            if track_id not in visible_id_set:
+                visible_ids.append(track_id)
+                visible_id_set.add(track_id)
 
             if track_id not in self.track_states:
                 self.track_states[track_id] = TrackState(
@@ -65,8 +86,9 @@ class PersonCounter:
             "ids": visible_ids,
         }
 
-    def cleanup(self, now):
-        stale_ids = []
+    def cleanup(self, now: float | None = None):
+        now = monotonic() if now is None else now
+        stale_ids: list[int] = []
 
         for track_id, state in self.track_states.items():
             if now - state.last_seen > self.max_idle_seconds:
@@ -85,6 +107,108 @@ MODEL_PATH = os.path.join(
 model = YOLO(MODEL_PATH)
 
 
+def detect_persons(frame, confidence_threshold: float = 0.35) -> tuple[list[PersonDetection], list[float]]:
+    """Run YOLO person detection and return normalized detections + scores."""
+    results = model(frame, verbose=False)
+    detections: list[PersonDetection] = []
+    scores: list[float] = []
+
+    for result in results:
+        for box in result.boxes:
+            cls = int(box.cls[0])
+            if cls != 0:
+                continue
+
+            conf = float(box.conf[0])
+            if conf < confidence_threshold:
+                continue
+
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            detections.append(PersonDetection(bbox=[x1, y1, x2, y2], conf=conf))
+            scores.append(conf)
+
+    return detections, scores
+
+
+def draw_detection_boxes(frame, detections: list[PersonDetection]):
+    """Draw plain detector boxes (offline processing path)."""
+    person_count = len(detections)
+    for idx, det in enumerate(detections):
+        x1, y1, x2, y2 = det.bbox
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(
+            frame,
+            f"Person {idx+1}/{person_count} {det.conf:.2f}",
+            (x1, y1 - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 255, 0),
+            2,
+        )
+    # Show total count on frame
+    cv2.putText(
+        frame,
+        f"Count: {person_count}",
+        (20, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (0, 0, 255),
+        2,
+    )
+
+
+def draw_tracked_people(frame, tracks: list[Any]):
+    """Draw tracker output with IDs (live path)."""
+    for track in tracks:
+        bbox = getattr(track, "bbox", None)
+        track_id = getattr(track, "track_id", None)
+        name = getattr(track, "name", None)
+        if bbox is None:
+            continue
+
+        x1, y1, x2, y2 = map(int, bbox)
+        if name:
+            label = f"{name} ID:{track_id}"
+        else:
+            label = f"Person ID:{track_id}" if track_id is not None else "Person"
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(
+            frame,
+            label,
+            (x1, max(y1 - 8, 0)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 255, 0),
+            2,
+        )
+
+
+def run_tracked_count_step(frame, tracker: Any, counter: PersonCounter, confidence_threshold: float = 0.35):
+    """
+    Correct live flow in one step:
+    YOLO -> tracker.update(...) -> PersonCounter.update(...) -> draw tracked boxes
+    """
+    detections, scores = detect_persons(frame, confidence_threshold=confidence_threshold)
+    raw_boxes = [det.bbox for det in detections]
+
+    try:
+        tracks = tracker.update(raw_boxes, scores=scores)
+    except TypeError:
+        # Fallback for trackers that only accept detections.
+        tracks = tracker.update(raw_boxes)
+
+    counts = counter.update(tracks)
+    annotated = frame.copy()
+    draw_tracked_people(annotated, tracks)
+
+    return {
+        "frame": annotated,
+        "tracks": tracks,
+        "counts": counts,
+        "detection_count": len(detections),
+    }
+
+
 def process_video(input_path, output_dir, frame_stride=1, progress_callback=None):
     if frame_stride < 1:
         raise ValueError("frame_stride must be >= 1.")
@@ -99,7 +223,6 @@ def process_video(input_path, output_dir, frame_stride=1, progress_callback=None
     temp_output_path = os.path.join(output_dir, f"processed_{stem}_{ts}_raw.mp4")
     output_path = os.path.join(output_dir, f"processed_{stem}_{ts}.mp4")
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     source_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     fps = source_fps if source_fps > 0 else 25.0
     source_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -110,10 +233,26 @@ def process_video(input_path, output_dir, frame_stride=1, progress_callback=None
         cap.release()
         raise ValueError("Invalid video dimensions.")
 
-    out = cv2.VideoWriter(temp_output_path, fourcc, output_fps, (width, height))
-    if not out.isOpened():
+    writer_candidates = [
+        (temp_output_path, "mp4v"),
+        (temp_output_path, "avc1"),
+        (os.path.join(output_dir, f"processed_{stem}_{ts}_raw.avi"), "XVID"),
+        (os.path.join(output_dir, f"processed_{stem}_{ts}_raw.avi"), "MJPG"),
+    ]
+    out = None
+    actual_temp_output_path = temp_output_path
+    for candidate_path, fourcc_name in writer_candidates:
+        fourcc = cv2.VideoWriter_fourcc(*fourcc_name)
+        writer = cv2.VideoWriter(candidate_path, fourcc, output_fps, (width, height))
+        if writer.isOpened():
+            out = writer
+            actual_temp_output_path = candidate_path
+            break
+        writer.release()
+
+    if out is None:
         cap.release()
-        raise ValueError("Could not initialize output video writer.")
+        raise ValueError("Could not initialize output video writer for any supported codec.")
 
     max_person_count = 0
     source_frame_index = 0
@@ -130,30 +269,9 @@ def process_video(input_path, output_dir, frame_stride=1, progress_callback=None
             source_frame_index += 1
             continue
 
-        results = model(frame, verbose=False)
-
-        person_count = 0
-
-        for r in results:
-            boxes = r.boxes
-            for box in boxes:
-                cls = int(box.cls[0])
-                if cls == 0:
-                    person_count += 1
-
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    conf = float(box.conf[0])
-
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(
-                        frame,
-                        f"Person {conf:.2f}",
-                        (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (0, 255, 0),
-                        2,
-                    )
+        detections, _scores = detect_persons(frame)
+        person_count = len(detections)
+        draw_detection_boxes(frame, detections)
 
         max_person_count = max(max_person_count, person_count)
         second_index = int(source_frame_index / fps) if fps else sampled_frames
@@ -163,16 +281,6 @@ def process_video(input_path, output_dir, frame_stride=1, progress_callback=None
         second_buckets[second_index]["frames"] += 1
 
         sampled_frames += 1
-
-        cv2.putText(
-            frame,
-            f"Count: {person_count}",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 0, 255),
-            2,
-        )
 
         out.write(frame)
         source_frame_index += 1
@@ -187,11 +295,12 @@ def process_video(input_path, output_dir, frame_stride=1, progress_callback=None
     cap.release()
     out.release()
 
+    encoded_output_path = actual_temp_output_path
     ffmpeg_cmd = [
         "ffmpeg",
         "-y",
         "-i",
-        temp_output_path,
+        actual_temp_output_path,
         "-c:v",
         "libx264",
         "-preset",
@@ -202,12 +311,20 @@ def process_video(input_path, output_dir, frame_stride=1, progress_callback=None
         "+faststart",
         output_path,
     ]
-    result = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode != 0:
-        raise ValueError("Failed to encode output video for browser playback.")
 
-    if os.path.exists(temp_output_path):
-        os.remove(temp_output_path)
+    try:
+        result = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode == 0:
+            encoded_output_path = output_path
+            if os.path.exists(actual_temp_output_path):
+                os.remove(actual_temp_output_path)
+        else:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+    except FileNotFoundError:
+        # ffmpeg may not be available in all environments; keep the OpenCV output in that case.
+        if os.path.exists(output_path):
+            os.remove(output_path)
 
     counts_per_second = []
     for second in sorted(second_buckets.keys()):
@@ -231,4 +348,4 @@ def process_video(input_path, output_dir, frame_stride=1, progress_callback=None
     if progress_callback:
         progress_callback(100, processed_source_frames, processed_source_frames)
 
-    return output_path, max_person_count, details
+    return encoded_output_path, max_person_count, details

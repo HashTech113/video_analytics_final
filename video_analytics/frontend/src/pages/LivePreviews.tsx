@@ -40,7 +40,6 @@ export default function LivePreviewsPage() {
       if (showStatus) {
         toast({
           title: "Unable to connect backend",
-          description: "Could not fetch connected camera streams. Please verify backend is running.",
           variant: "destructive",
         });
       }

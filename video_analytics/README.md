@@ -26,7 +26,19 @@ cd ..
 Start backend + frontend together:
 
 ```bash
+npm run all
+```
+
+(`npm run full` is also supported.)
+
+```bash
 npm run full
+```
+
+Start backend + frontend with public host binding (EC2/LAN):
+
+```bash
+npm run full:public
 ```
 
 Default URLs:

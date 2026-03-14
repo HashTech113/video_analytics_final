@@ -36,7 +36,7 @@ function PersistentRouteShell() {
   const isUpload = pathname === "/" || pathname === "/upload";
   const isLiveStream = pathname === "/live-stream";
   const isProcessedVideos = pathname === "/processed-video" || pathname === "/processed-video/processed-videos";
-  const isLivePreviews = pathname === "/live-previews";
+  const isLivePreviews = pathname === "/live-previews" || pathname === "/live-preivews";
   const isData = pathname === "/data";
   const isAnalytics = pathname === "/analytics";
 

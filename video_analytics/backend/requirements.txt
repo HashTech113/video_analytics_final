@@ -7,4 +7,5 @@ numpy
 aiortc
 av
 insightface
+onnxruntime
 supervision

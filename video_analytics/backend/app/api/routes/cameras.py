@@ -3,7 +3,7 @@ from datetime import datetime
 from fractions import Fraction
 import importlib
 from threading import Event, Lock, Thread
-from time import sleep
+from time import monotonic, sleep
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
@@ -13,21 +13,24 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.core.config import SUPPORTED_USE_CASES
-from src.person_count import model as person_count_model
 from app.services.store import (
     delete_connected_camera,
-    get_unsupported_use_cases,
     get_connected_camera,
+    get_unsupported_use_cases,
     list_connected_cameras,
     normalize_use_cases,
     set_connected_camera,
 )
+from src.person_count import PersonCounter, run_tracked_count_step
+from src.person_recognition.bytetrack_tracker import ByteTrackFaceTracker
 
 
 router = APIRouter(prefix="/api")
+
 CAMERA_PEER_CONNECTIONS: dict[str, set] = {}
 CAMERA_STREAMS: dict[str, "CameraStream"] = {}
 CAMERA_STREAMS_LOCK = Lock()
+
 RECOGNITION_SERVICE = None
 RECOGNITION_SERVICE_INIT_FAILED = False
 RECOGNITION_SERVICE_LOCK = Lock()
@@ -56,9 +59,13 @@ class CameraStream:
         self.rtsp_url = rtsp_url
         self.stop_event = Event()
         self.frame_lock = Lock()
+
         self.frame = None
         self.last_frame_at = 0.0
         self.source_fps = 0.0
+
+        self.processor = CameraFrameProcessor(camera_id=camera_id)
+
         self.thread = Thread(
             target=self._run,
             daemon=True,
@@ -69,6 +76,7 @@ class CameraStream:
     def _run(self):
         capture = _create_rtsp_capture(self.rtsp_url)
         failures = 0
+
         while not self.stop_event.is_set():
             if not capture.isOpened():
                 capture.release()
@@ -89,6 +97,7 @@ class CameraStream:
 
             failures = 0
             fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+
             with self.frame_lock:
                 self.frame = frame.copy()
                 self.last_frame_at = datetime.utcnow().timestamp()
@@ -111,6 +120,204 @@ class CameraStream:
         self.stop_event.set()
         if self.thread.is_alive():
             self.thread.join(timeout=2.0)
+
+
+class CameraFrameProcessor:
+    """
+    Keeps stable state for each camera:
+    - runs detection only at intervals
+    - updates tracker with detections
+    - draws tracked boxes on every frame
+    """
+
+    def __init__(self, camera_id: str):
+        self.camera_id = camera_id
+        self.lock = Lock()
+
+        self.frame_index = 0
+        self.detection_frame_stride = 2
+        self.max_track_stale_seconds = 0.8
+        self.max_missing_detection_cycles = 5
+        self.missing_detection_cycles = 0
+        self.last_tracks_at = 0.0
+        self.person_tracks = []
+        self.last_person_count = 0
+        self.total_person_count = 0
+        self.last_known_count = 0
+        self.last_unknown_count = 0
+        self.face_tracks = []
+        self.last_face_tracks_at = 0.0
+        self.max_face_track_stale_seconds = 0.8
+        self.started_at = datetime.utcnow()
+        self.tracker = ByteTrackFaceTracker(
+            track_thresh=0.25,
+            track_buffer=30,
+            match_thresh=0.8,
+            frame_rate=30,
+            fallback_iou_threshold=0.3,
+            fallback_center_distance_threshold=120,
+            smoothing_alpha=0.6,
+        )
+        self.counter = PersonCounter(min_hits=3, max_idle_seconds=2.0)
+
+    def process(self, frame, enable_person_count: bool, enable_person_recognition: bool):
+        with self.lock:
+            self.frame_index += 1
+            now = monotonic()
+
+            if enable_person_count:
+                if self._should_run_detection():
+                    self._update_person_tracks(frame, now)
+                else:
+                    self._predict_person_tracks(now)
+
+            if enable_person_recognition and self.frame_index % 4 == 0:
+                known_count, unknown_count, face_results = _run_person_recognition(frame)
+                self.last_known_count = known_count
+                self.last_unknown_count = unknown_count
+                self.face_tracks = face_results
+                self.last_face_tracks_at = now
+
+            if not enable_person_recognition:
+                self.face_tracks = []
+
+            self._prune_stale_tracks(now)
+            self.counter.cleanup(now)
+
+            annotated = frame.copy()
+            self._draw_person_tracks(annotated)
+            self._draw_face_tracks(annotated, now)
+
+            metrics: list[tuple[str, int]] = []
+            if enable_person_count:
+                metrics.append(("Count", self.last_person_count))
+            if enable_person_recognition:
+                metrics.append(("Known", self.last_known_count))
+                metrics.append(("Unknown", self.last_unknown_count))
+            _draw_top_right_metrics(annotated, metrics)
+
+            elapsed_seconds = int((datetime.utcnow() - self.started_at).total_seconds())
+            if enable_person_count and self.frame_index % 5 == 0:
+                set_connected_camera(
+                    self.camera_id,
+                    allow_create=False,
+                    current_person_count=self.last_person_count,
+                    total_person_count=self.total_person_count,
+                    total_frames=self.frame_index,
+                    processing_time_seconds=max(elapsed_seconds, 0),
+                )
+
+            return annotated
+
+    def _should_run_detection(self) -> bool:
+        return self.frame_index == 1 or (self.frame_index % self.detection_frame_stride) == 0
+
+    def _update_person_tracks(self, frame, now: float):
+        try:
+            step = run_tracked_count_step(
+                frame=frame,
+                tracker=self.tracker,
+                counter=self.counter,
+                confidence_threshold=0.25,
+            )
+            tracks = step["tracks"]
+            counts = step["counts"]
+            detection_count = int(step.get("detection_count", 0))
+        except Exception:
+            tracks = []
+            counts = {"current": 0, "entered": self.total_person_count}
+            detection_count = 0
+
+        if detection_count > 0:
+            self.missing_detection_cycles = 0
+        else:
+            self.missing_detection_cycles += 1
+            if self.missing_detection_cycles >= self.max_missing_detection_cycles:
+                tracks = []
+                counts = self.counter.update([])
+
+        self.person_tracks = tracks
+        self.last_tracks_at = now
+        self.last_person_count = int(counts.get("current", len(tracks)))
+        self.total_person_count = int(counts.get("entered", self.total_person_count))
+
+    def _predict_person_tracks(self, now: float):
+        if self.missing_detection_cycles >= self.max_missing_detection_cycles:
+            self.person_tracks = []
+            self.last_person_count = 0
+            self.counter.update([])
+            return
+
+        try:
+            tracks = self.tracker.update([], scores=[])
+            counts = self.counter.update(tracks)
+        except Exception:
+            tracks = self.person_tracks
+            counts = {"current": len(tracks), "entered": self.total_person_count}
+
+        self.person_tracks = tracks
+        self.last_tracks_at = now
+        self.last_person_count = int(counts.get("current", len(tracks)))
+        self.total_person_count = int(counts.get("entered", self.total_person_count))
+
+    def _prune_stale_tracks(self, now: float):
+        if (now - self.last_tracks_at) > self.max_track_stale_seconds:
+            self.person_tracks = []
+            self.last_person_count = 0
+            return
+        self.last_person_count = len(self.person_tracks)
+
+    def _draw_person_tracks(self, frame):
+        seen_ids: set[int] = set()
+        for track in self.person_tracks:
+            bbox = getattr(track, "bbox", None)
+            track_id = getattr(track, "track_id", None)
+            if bbox is None or len(bbox) != 4:
+                continue
+            if track_id is not None:
+                track_id = int(track_id)
+                if track_id in seen_ids:
+                    continue
+                seen_ids.add(track_id)
+            x1, y1, x2, y2 = map(int, bbox)
+            label = f"Person ID:{track_id}" if track_id is not None else "Person"
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(
+                frame,
+                label,
+                (x1, max(y1 - 8, 0)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 255, 0),
+                2,
+            )
+
+    def _draw_face_tracks(self, frame, now: float):
+        if (now - self.last_face_tracks_at) > self.max_face_track_stale_seconds:
+            self.face_tracks = []
+            return
+
+        for result in self.face_tracks:
+            bbox = result.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+
+            x1, y1, x2, y2 = map(int, bbox)
+            identity = str(result.get("name", "Unknown")).strip() or "Unknown"
+            track_id = result.get("id")
+            label = f"{identity} ID:{track_id}" if track_id is not None else identity
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 200, 255), 2)
+            cv2.putText(
+                frame,
+                label,
+                (x1, max(y1 - 8, 0)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 200, 255),
+                2,
+            )
 
 
 def _ensure_camera_stream(camera_id: str, rtsp_url: str) -> CameraStream:
@@ -156,9 +363,7 @@ def _build_candidate_rtsp_urls(rtsp_url: str) -> list[str]:
     if query.get("rtsp_transport", "").lower() != "tcp":
         query["rtsp_transport"] = "tcp"
         tcp_query = urlencode(query)
-        tcp_url = urlunparse(
-            (parsed.scheme, parsed.netloc, parsed.path, parsed.params, tcp_query, parsed.fragment)
-        )
+        tcp_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, tcp_query, parsed.fragment))
         candidates.append(tcp_url)
     return candidates
 
@@ -197,10 +402,6 @@ def _verify_rtsp_stream(rtsp_url: str) -> str:
     )
 
 
-def stop_all_live_camera_recordings():
-    stop_all_camera_streams()
-
-
 def _get_recognition_service():
     global RECOGNITION_SERVICE
     global RECOGNITION_SERVICE_INIT_FAILED
@@ -224,12 +425,12 @@ def _get_recognition_service():
 def _run_person_recognition(frame):
     recognition_service = _get_recognition_service()
     if recognition_service is None:
-        return 0, 0
+        return 0, 0, []
 
     try:
         _, results = recognition_service.recognize(frame)
     except Exception:
-        return 0, 0
+        return 0, 0, []
 
     known = 0
     unknown = 0
@@ -239,7 +440,7 @@ def _run_person_recognition(frame):
             unknown += 1
         else:
             known += 1
-    return known, unknown
+    return known, unknown, results
 
 
 def _draw_top_right_metrics(frame, metrics: list[tuple[str, int]]):
@@ -263,6 +464,32 @@ def _draw_top_right_metrics(frame, metrics: list[tuple[str, int]]):
         cv2.putText(frame, text, (x, y), font, font_scale, color, thickness)
 
 
+def _annotate_frame_for_camera(
+    camera_id: str,
+    rtsp_url: str,
+    enable_person_count: bool,
+    enable_person_recognition: bool,
+    retries: int = 20,
+):
+    shared_stream = _ensure_camera_stream(camera_id, rtsp_url)
+
+    frame = None
+    for _ in range(retries):
+        frame = shared_stream.get_frame_copy()
+        if frame is not None:
+            break
+        sleep(0.02)
+
+    if frame is None:
+        return None
+
+    return shared_stream.processor.process(
+        frame=frame,
+        enable_person_count=enable_person_count,
+        enable_person_recognition=enable_person_recognition,
+    )
+
+
 def _create_webrtc_track(camera_id: str, rtsp_url: str, enable_person_count: bool, enable_person_recognition: bool):
     try:
         aiortc_module = importlib.import_module("aiortc")
@@ -271,10 +498,7 @@ def _create_webrtc_track(camera_id: str, rtsp_url: str, enable_person_count: boo
     except ModuleNotFoundError as exc:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "WebRTC dependencies are not installed on backend environment. "
-                "Install `aiortc` and `av` in backend venv."
-            ),
+            detail="WebRTC dependencies are not installed on backend environment. Install `aiortc` and `av`.",
         ) from exc
 
     VideoStreamTrack = getattr(aiortc_module, "VideoStreamTrack")
@@ -285,15 +509,9 @@ def _create_webrtc_track(camera_id: str, rtsp_url: str, enable_person_count: boo
         def __init__(self):
             super().__init__()
             self.camera_id = camera_id
+            self.rtsp_url = rtsp_url
             self.enable_person_count = enable_person_count
             self.enable_person_recognition = enable_person_recognition
-            self.shared_stream = _ensure_camera_stream(camera_id, rtsp_url)
-            self.frame_index = 0
-            self.last_person_count = 0
-            self.last_known_count = 0
-            self.last_unknown_count = 0
-            self.cumulative_person_count = 0
-            self.started_at = datetime.utcnow()
             self.closed = False
 
         async def recv(self):
@@ -302,62 +520,16 @@ def _create_webrtc_track(camera_id: str, rtsp_url: str, enable_person_count: boo
 
             pts, time_base = await self.next_timestamp()
 
-            for _ in range(20):
-                frame = self.shared_stream.get_frame_copy()
-                if frame is not None:
-                    break
-                await asyncio.sleep(0.02)
-            else:
+            frame = await asyncio.to_thread(
+                _annotate_frame_for_camera,
+                self.camera_id,
+                self.rtsp_url,
+                self.enable_person_count,
+                self.enable_person_recognition,
+            )
+
+            if frame is None:
                 raise MediaStreamError
-
-            self.frame_index += 1
-            if self.enable_person_count and self.frame_index % 2 == 0:
-                results = person_count_model(frame, verbose=False)
-                person_count = 0
-                for result in results:
-                    boxes = result.boxes
-                    for box in boxes:
-                        cls = int(box.cls[0])
-                        if cls == 0:
-                            person_count += 1
-                            x1, y1, x2, y2 = map(int, box.xyxy[0])
-                            conf = float(box.conf[0])
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                            cv2.putText(
-                                frame,
-                                f"Person {conf:.2f}",
-                                (x1, max(y1 - 8, 0)),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.45,
-                                (0, 255, 0),
-                                2,
-                            )
-                self.last_person_count = person_count
-
-            if self.enable_person_recognition and self.frame_index % 2 == 0:
-                known_count, unknown_count = _run_person_recognition(frame)
-                self.last_known_count = known_count
-                self.last_unknown_count = unknown_count
-
-            self.cumulative_person_count += max(self.last_person_count, 0)
-            elapsed_seconds = int((datetime.utcnow() - self.started_at).total_seconds())
-            if self.enable_person_count and self.frame_index % 5 == 0:
-                set_connected_camera(
-                    self.camera_id,
-                    allow_create=False,
-                    current_person_count=self.last_person_count,
-                    total_person_count=self.cumulative_person_count,
-                    total_frames=self.frame_index,
-                    processing_time_seconds=max(elapsed_seconds, 0),
-                )
-
-            metrics: list[tuple[str, int]] = []
-            if self.enable_person_count:
-                metrics.append(("Count", self.last_person_count))
-            if self.enable_person_recognition:
-                metrics.append(("Known", self.last_known_count))
-                metrics.append(("Unknown", self.last_unknown_count))
-            _draw_top_right_metrics(frame, metrics)
 
             video_frame = VideoFrame.from_ndarray(frame, format="bgr24")
             video_frame.pts = pts
@@ -372,79 +544,23 @@ def _create_webrtc_track(camera_id: str, rtsp_url: str, enable_person_count: boo
 
 
 def _generate_mjpeg_frames(camera_id: str, rtsp_url: str, enable_person_count: bool, enable_person_recognition: bool):
-    shared_stream = _ensure_camera_stream(camera_id, rtsp_url)
-
-    frame_index = 0
-    last_person_count = 0
-    last_known_count = 0
-    last_unknown_count = 0
-    cumulative_person_count = 0
-    stream_started_at = datetime.utcnow()
-
     while True:
-        frame = shared_stream.get_frame_copy()
+        frame = _annotate_frame_for_camera(
+            camera_id=camera_id,
+            rtsp_url=rtsp_url,
+            enable_person_count=enable_person_count,
+            enable_person_recognition=enable_person_recognition,
+        )
         if frame is None:
-            sleep(0.1)
+            sleep(0.05)
             continue
-
-        frame_index += 1
-        if enable_person_count and frame_index % 2 == 0:
-            results = person_count_model(frame, verbose=False)
-            person_count = 0
-            for result in results:
-                boxes = result.boxes
-                for box in boxes:
-                    cls = int(box.cls[0])
-                    if cls == 0:
-                        person_count += 1
-                        x1, y1, x2, y2 = map(int, box.xyxy[0])
-                        conf = float(box.conf[0])
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        cv2.putText(
-                            frame,
-                            f"Person {conf:.2f}",
-                            (x1, max(y1 - 8, 0)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.45,
-                            (0, 255, 0),
-                            2,
-                        )
-            last_person_count = person_count
-
-        if enable_person_recognition and frame_index % 2 == 0:
-            known_count, unknown_count = _run_person_recognition(frame)
-            last_known_count = known_count
-            last_unknown_count = unknown_count
-
-        cumulative_person_count += max(last_person_count, 0)
-        elapsed_seconds = int((datetime.utcnow() - stream_started_at).total_seconds())
-        if enable_person_count and frame_index % 5 == 0:
-            set_connected_camera(
-                camera_id,
-                allow_create=False,
-                current_person_count=last_person_count,
-                total_person_count=cumulative_person_count,
-                total_frames=frame_index,
-                processing_time_seconds=max(elapsed_seconds, 0),
-            )
-
-        metrics: list[tuple[str, int]] = []
-        if enable_person_count:
-            metrics.append(("Count", last_person_count))
-        if enable_person_recognition:
-            metrics.append(("Known", last_known_count))
-            metrics.append(("Unknown", last_unknown_count))
-        _draw_top_right_metrics(frame, metrics)
 
         ok, buffer = cv2.imencode(".jpg", frame)
         if not ok:
             continue
 
         frame_bytes = buffer.tobytes()
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
-        )
+        yield b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
 
 
 @router.post("/cameras/connect")
@@ -470,6 +586,7 @@ async def connect_camera(payload: CameraConnectRequest):
     camera_id = str(uuid4())
     camera_name = (payload.camera_name or "").strip() or f"Camera-{camera_id[:8]}"
     safe_stream_url = f"rtsp://{parsed.hostname}:{parsed.port or 554}{parsed.path or ''}"
+
     _ensure_camera_stream(camera_id=camera_id, rtsp_url=verified_rtsp_url)
     camera = set_connected_camera(
         camera_id,
@@ -614,10 +731,7 @@ async def create_webrtc_offer(camera_id: str, payload: WebRTCOfferRequest):
     except ModuleNotFoundError as exc:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "WebRTC dependencies are not installed on backend environment. "
-                "Install `aiortc` and `av` in backend venv."
-            ),
+            detail="WebRTC dependencies are not installed on backend environment. Install `aiortc` and `av`.",
         ) from exc
 
     RTCPeerConnection = getattr(aiortc_module, "RTCPeerConnection")

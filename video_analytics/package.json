@@ -2,8 +2,13 @@
   "name": "video-analytics-workspace",
   "private": true,
   "scripts": {
-    "frontend": "cd frontend && npm run dev -- --host 0.0.0.0 --port 5173",
+    "all": "npm run full",
+    "all:public": "npm run full:public",
+    "frontend": "cd frontend && npm run dev -- --host localhost --port 5173",
+    "frontend:public": "cd frontend && npm run dev -- --host 0.0.0.0 --port 5173",
     "backend": "cd backend && ./.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000",
-    "full": "sh -c 'trap \"kill 0\" INT TERM EXIT; npm run backend & npm run frontend & wait'"
+    "backend:local": "cd backend && ./.venv/bin/python -m uvicorn main:app --host localhost --port 8000",
+    "full": "sh -c 'trap \"kill 0\" INT TERM EXIT; npm run backend & npm run frontend & wait'",
+    "full:public": "sh -c 'trap \"kill 0\" INT TERM EXIT; npm run backend & npm run frontend:public & wait'"
   }
 }
