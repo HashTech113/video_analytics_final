@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime
 from fractions import Fraction
 import importlib
+import os
 from threading import Event, Lock, Thread
 from time import monotonic, sleep
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -369,9 +370,24 @@ def _build_candidate_rtsp_urls(rtsp_url: str) -> list[str]:
 
 
 def _create_rtsp_capture(rtsp_url: str):
+    # Reduce noisy decoder warnings and force more resilient RTSP/FFmpeg behavior
+    # for cameras that intermittently send broken H.264 packets.
+    os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", os.getenv("RTSP_FFMPEG_LOGLEVEL", "8"))
+    os.environ.setdefault(
+        "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+        os.getenv(
+            "RTSP_FFMPEG_CAPTURE_OPTIONS",
+            "rtsp_transport;tcp|fflags;discardcorrupt|flags;low_delay|max_delay;500000|stimeout;5000000",
+        ),
+    )
+
     capture = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
+        capture.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
+    if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
+        capture.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
     return capture
 
 

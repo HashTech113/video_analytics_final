@@ -43,10 +43,19 @@ class FaceMatcher:
                 )
 
     def match(self, embedding, threshold=0.45):
+        embedding_norm = np.linalg.norm(embedding)
+        if embedding_norm == 0:
+            return "Unknown"
+        embedding = embedding / embedding_norm
+
         best_match = None
         best_score = 1.0
 
         for name, known_emb in self.known_embeddings.items():
+            known_norm = np.linalg.norm(known_emb)
+            if known_norm == 0:
+                continue
+            known_emb = known_emb / known_norm
             dist = np.linalg.norm(embedding - known_emb)
 
             if dist < best_score:

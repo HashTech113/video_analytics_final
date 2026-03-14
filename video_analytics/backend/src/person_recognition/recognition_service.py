@@ -82,7 +82,8 @@ class RecognitionService:
 
                 if best_index >= 0 and best_iou >= 0.3:
                     name = self.matcher.match(embeddings[best_index])
-                self.track_names[track.track_id] = name
+                if name != "Unknown":
+                    self.track_names[track.track_id] = name
 
             results.append(
                 {
