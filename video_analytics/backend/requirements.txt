@@ -6,3 +6,5 @@ opencv-python
 numpy
 aiortc
 av
+insightface
+supervision

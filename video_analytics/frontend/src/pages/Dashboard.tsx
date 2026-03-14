@@ -3,7 +3,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { HourlyAnalyticsChart, ProcessedVideoPanel } from "@/components/AnalyticsCharts";
 import {
   deleteConnectedCamera,
   deleteVideo,
@@ -180,7 +179,14 @@ export default function Dashboard() {
   const hasViewedVideo = selectedVideo !== null;
   const hasViewedLiveCamera = selectedCameraPreview !== null;
 
-  const fetchAnalytics = async () => {
+  const fetchAnalytics = async (showConnectionToast = false) => {
+    const statusToast = showConnectionToast
+      ? toast({
+          title: "Backend connecting",
+          description: "Connecting to analytics backend...",
+        })
+      : null;
+
     try {
       const [analyticsResponse, camerasResponse] = await Promise.all([
         getAnalytics(),
@@ -196,19 +202,36 @@ export default function Dashboard() {
       }));
       setAnalytics(analyticsResponse.data);
       setConnectedCameras(camerasResponse);
+      if (statusToast) {
+        statusToast.update({
+          id: statusToast.id,
+          title: "Backend connected",
+          description: "Analytics loaded successfully.",
+          variant: "success",
+        });
+      }
     } catch {
-      toast({
-        title: "Analytics unavailable",
-        description: "Could not load analytics from backend.",
-        variant: "destructive",
-      });
+      if (statusToast) {
+        statusToast.update({
+          id: statusToast.id,
+          title: "Analytics unavailable",
+          description: "Could not load analytics from backend.",
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Analytics unavailable",
+          description: "Could not load analytics from backend.",
+          variant: "destructive",
+        });
+      }
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchAnalytics();
+    fetchAnalytics(true);
   }, []);
 
   const handleDownloadReport = async () => {
@@ -577,93 +600,6 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       )}
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Selected Stream/Video Data</CardTitle>
-        </CardHeader>
-        <CardContent className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div className="rounded-md border p-3">
-            <p className="text-xs text-muted-foreground">Camera Name</p>
-            <p className="text-sm font-medium break-words">{selectedSummary.cameraName}</p>
-          </div>
-          <div className="rounded-md border p-3">
-            <p className="text-xs text-muted-foreground">Camera IP</p>
-            <p className="text-sm font-medium break-words">{selectedSummary.cameraIp}</p>
-          </div>
-          <div className="rounded-md border p-3">
-            <p className="text-xs text-muted-foreground">Date</p>
-            <p className="text-sm font-medium">{selectedSummary.date}</p>
-          </div>
-          <div className="rounded-md border p-3">
-            <p className="text-xs text-muted-foreground">Use Case</p>
-            <p className="text-sm font-medium break-words">{selectedSummary.useCase}</p>
-          </div>
-          <div className="rounded-md border p-3">
-            <p className="text-xs text-muted-foreground">Person Count</p>
-            <p className="text-sm font-medium">{selectedSummary.personCount}</p>
-          </div>
-          <div className="rounded-md border p-3">
-            <p className="text-xs text-muted-foreground">Status</p>
-            <p className="text-sm font-medium">{selectedSummary.status}</p>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <HourlyAnalyticsChart
-          data={hourlyChartData}
-          title={
-            selectedVideo
-              ? `Hourly Analytics (${selectedVideo.videoName})`
-              : selectedLiveCamera
-                ? `Live Person Count (${selectedSummary.cameraName})`
-                : "Hourly Analytics"
-          }
-          xAxisLabel={
-            selectedVideoTimeline
-              ? `Video Timeline (${selectedVideoTimeline.granularity})`
-              : selectedLiveCamera
-                ? "Live Timeline (seconds)"
-                : "Duration"
-          }
-          xDataKey={selectedVideo || selectedLiveCamera ? "second" : "hour"}
-          xAxisType={selectedVideo || selectedLiveCamera ? "number" : "category"}
-          xTicks={selectedVideoTimeline ? selectedVideoTimeline.ticks : selectedLiveCamera ? liveChartTicks : undefined}
-          xAxisInterval="preserveEnd"
-          xDomain={
-            selectedVideoTimeline
-              ? [0, selectedVideoTimeline.endSecond]
-              : selectedLiveCamera
-                ? [0, liveChartEndSecond]
-                : undefined
-          }
-          xTickFormatter={
-            selectedVideoTimeline
-              ? (value) => formatTimelineTick(Number(value), selectedVideoTimeline.granularity)
-              : selectedLiveCamera
-                ? (value) => `${Math.round(Number(value))}s`
-              : undefined
-          }
-          tooltipLabelFormatter={
-            selectedVideoTimeline
-              ? (value) => formatTimelineTooltip(Number(value) || 0, selectedVideoTimeline.granularity)
-              : selectedLiveCamera
-                ? (value) => `Second ${Math.round(Number(value) || 0)}`
-              : undefined
-          }
-          yDataKey={selectedVideo || selectedLiveCamera ? "personCount" : "detections"}
-          yAxisLabel={selectedVideo || selectedLiveCamera ? "Person Count" : "Counts"}
-          lineName={selectedVideo || selectedLiveCamera ? "Person Count" : "Count"}
-        />
-        <ProcessedVideoPanel
-          liveCameraId={selectedCameraPreview?.id}
-          liveStreamUrl={selectedCameraPreview?.streamUrl}
-          liveCameraName={selectedCameraPreview?.cameraName}
-          videoUrl={selectedVideo?.processedVideo}
-          videoName={selectedVideo?.videoName}
-        />
-      </div>
 
     </div>
   );

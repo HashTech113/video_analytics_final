@@ -1,0 +1,59 @@
+import os
+import numpy as np
+import cv2
+
+
+class FaceMatcher:
+    def __init__(self, recognizer, dataset_path="dataset/person_dataset"):
+        self.recognizer = recognizer
+        self.dataset_path = dataset_path
+
+        self.known_embeddings = {}
+        self.load_dataset()
+
+    def load_dataset(self):
+        if not os.path.isdir(self.dataset_path):
+            return
+
+        for person_name in os.listdir(self.dataset_path):
+            person_path = os.path.join(self.dataset_path, person_name)
+
+            if not os.path.isdir(person_path):
+                continue
+
+            embeddings = []
+
+            for img_name in os.listdir(person_path):
+                img_path = os.path.join(person_path, img_name)
+                img = cv2.imread(img_path)
+                if img is None:
+                    continue
+
+                faces = self.recognizer.get_embeddings(img)
+
+                if len(faces) == 0:
+                    continue
+
+                embeddings.append(faces[0]["embedding"])
+
+            if embeddings:
+                self.known_embeddings[person_name] = np.mean(
+                    embeddings,
+                    axis=0,
+                )
+
+    def match(self, embedding, threshold=0.45):
+        best_match = None
+        best_score = 1.0
+
+        for name, known_emb in self.known_embeddings.items():
+            dist = np.linalg.norm(embedding - known_emb)
+
+            if dist < best_score:
+                best_score = dist
+                best_match = name
+
+        if best_score < threshold:
+            return best_match
+
+        return "Unknown"

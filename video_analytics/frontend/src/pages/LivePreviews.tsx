@@ -1,30 +1,46 @@
 import { useEffect, useRef, useState } from "react";
-import { Maximize2, MonitorPlay, MoreVertical, Trash2 } from "lucide-react";
+import { Maximize2, MonitorPlay, MoreVertical, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { deleteConnectedCamera, getConnectedCameras, type ConnectedCamera } from "@/lib/api";
 import { toBackendAssetUrl } from "@/lib/http";
 import { toast } from "@/hooks/use-toast";
+import { useNavigate } from "react-router-dom";
 
 export default function LivePreviewsPage() {
+  const navigate = useNavigate();
   const [cameras, setCameras] = useState<ConnectedCamera[]>([]);
   const [loading, setLoading] = useState(true);
   const [menuCameraId, setMenuCameraId] = useState<string | null>(null);
   const [deletingCameraId, setDeletingCameraId] = useState<string | null>(null);
   const previewRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const pendingRemovalIdsRef = useRef<Set<string>>(new Set());
+  const removedCameraIdsRef = useRef<Set<string>>(new Set());
+  const backendConnectedRef = useRef(false);
 
-  const fetchCameras = async (showError = false) => {
+  const fetchCameras = async (showStatus = false) => {
     try {
       const data = await getConnectedCameras();
       setCameras(
-        data.filter((camera) => !pendingRemovalIdsRef.current.has(camera.camera_id)),
+        data.filter(
+          (camera) =>
+            !pendingRemovalIdsRef.current.has(camera.camera_id)
+            && !removedCameraIdsRef.current.has(camera.camera_id),
+        ),
       );
-    } catch {
-      if (showError) {
+      if (showStatus || !backendConnectedRef.current) {
         toast({
-          title: "Unable to load live previews",
-          description: "Could not fetch connected camera streams.",
+          title: "Backend connected successfully",
+          variant: "success",
+        });
+      }
+      backendConnectedRef.current = true;
+    } catch {
+      backendConnectedRef.current = false;
+      if (showStatus) {
+        toast({
+          title: "Unable to connect backend",
+          description: "Could not fetch connected camera streams. Please verify backend is running.",
           variant: "destructive",
         });
       }
@@ -33,8 +49,19 @@ export default function LivePreviewsPage() {
     }
   };
 
+  const handleEditCamera = (cameraId: string) => {
+    setMenuCameraId(null);
+    navigate(`/live-stream?editCameraId=${encodeURIComponent(cameraId)}`);
+  };
+
   useEffect(() => {
-    fetchCameras(true);
+    void fetchCameras(true);
+    const intervalId = window.setInterval(() => {
+      void fetchCameras(false);
+    }, 2500);
+    return () => {
+      window.clearInterval(intervalId);
+    };
   }, []);
 
   const handleFullscreen = async (cameraId: string) => {
@@ -61,9 +88,12 @@ export default function LivePreviewsPage() {
     setDeletingCameraId(cameraId);
     try {
       await deleteConnectedCamera(cameraId);
+      removedCameraIdsRef.current.add(cameraId);
       pendingRemovalIdsRef.current.delete(cameraId);
+      await fetchCameras(false);
       toast({ title: "Camera removed successfully" });
     } catch {
+      removedCameraIdsRef.current.delete(cameraId);
       pendingRemovalIdsRef.current.delete(cameraId);
       setCameras(previousCameras);
       toast({
@@ -75,6 +105,12 @@ export default function LivePreviewsPage() {
       setDeletingCameraId(null);
     }
   };
+
+  const formatUseCaseLabel = (useCase: string) =>
+    useCase
+      .split("_")
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(" ");
 
   return (
     <div className="space-y-6">
@@ -94,7 +130,7 @@ export default function LivePreviewsPage() {
       ) : cameras.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-sm text-muted-foreground">
-            No live cameras connected yet.
+            Setup complete. Start connecting cameras for further processing.
           </CardContent>
         </Card>
       ) : (
@@ -135,7 +171,16 @@ export default function LivePreviewsPage() {
                       <MoreVertical className="h-4 w-4" />
                     </Button>
                     {menuCameraId === camera.camera_id && (
-                      <div className="absolute right-0 top-9 z-20 min-w-[160px] rounded-md border border-border bg-card p-1 shadow-lg">
+                      <div className="absolute right-0 top-9 z-20 min-w-[180px] rounded-md border border-border bg-card p-1 shadow-lg">
+                        <button
+                          type="button"
+                          className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-secondary disabled:opacity-60"
+                          onClick={() => handleEditCamera(camera.camera_id)}
+                          disabled={deletingCameraId === camera.camera_id}
+                        >
+                          <Pencil className="h-4 w-4" />
+                          Edit camera
+                        </button>
                         <button
                           type="button"
                           className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-rose-600 hover:bg-secondary disabled:opacity-60"
@@ -151,6 +196,12 @@ export default function LivePreviewsPage() {
                 </div>
                 <p className="text-xs text-muted-foreground">
                   {camera.host || "N/A"}:{camera.port || "N/A"} ({camera.status || "connected"})
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Use Case:{" "}
+                  {camera.use_cases && camera.use_cases.length > 0
+                    ? camera.use_cases.map((useCase) => formatUseCaseLabel(useCase)).join(", ")
+                    : "N/A"}
                 </p>
               </CardHeader>
               <CardContent>

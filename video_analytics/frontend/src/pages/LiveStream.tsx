@@ -1,11 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Camera, Eye, EyeOff, Loader2, Wifi } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { connectCameraRtsp } from "@/lib/api";
+import {
+  connectCameraRtsp,
+  getConnectedCamera,
+  updateConnectedCamera,
+} from "@/lib/api";
 import { toast } from "@/hooks/use-toast";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 const USE_CASE_OPTIONS = [
   { value: "person_count", label: "Person Count" },
@@ -13,16 +18,101 @@ const USE_CASE_OPTIONS = [
 ];
 
 export default function LiveStream() {
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const editCameraId = searchParams.get("editCameraId")?.trim() || "";
+  const isEditing = Boolean(editCameraId);
   const [cameraName, setCameraName] = useState("");
   const [cameraIp, setCameraIp] = useState("");
   const [cameraUsername, setCameraUsername] = useState("");
   const [cameraPassword, setCameraPassword] = useState("");
   const [cameraPort, setCameraPort] = useState("554");
-  const [selectedUseCases, setSelectedUseCases] = useState<string[]>(["person_count"]);
+  const [selectedUseCases, setSelectedUseCases] = useState<string[]>([]);
   const [showPassword, setShowPassword] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [connectionMessage, setConnectionMessage] = useState("");
+  const [prefilling, setPrefilling] = useState(false);
+  const [initialEditSnapshot, setInitialEditSnapshot] = useState<{
+    cameraName: string;
+    cameraIp: string;
+    cameraUsername: string;
+    cameraPassword: string;
+    cameraPort: string;
+    selectedUseCases: string[];
+  } | null>(null);
+
+  const normalizeUseCasesForCompare = (useCases: string[]) => {
+    const unique = new Set(
+      useCases
+        .map((value) => (value || "").trim())
+        .filter(Boolean),
+    );
+    return Array.from(unique).sort();
+  };
+
+  useEffect(() => {
+    if (!isEditing || !editCameraId) {
+      return;
+    }
+
+    const parseRtspUrl = (rtspUrl: string): {
+      ip: string;
+      username: string;
+      password: string;
+      port: string;
+    } => {
+      try {
+        const parsed = new URL(rtspUrl);
+        return {
+          ip: parsed.hostname || "",
+          username: decodeURIComponent(parsed.username || ""),
+          password: decodeURIComponent(parsed.password || ""),
+          port: parsed.port || "554",
+        };
+      } catch {
+        return {
+          ip: "",
+          username: "",
+          password: "",
+          port: "554",
+        };
+      }
+    };
+
+    const loadCameraForEdit = async () => {
+      setPrefilling(true);
+      try {
+        const camera = await getConnectedCamera(editCameraId);
+        const parsed = parseRtspUrl(camera.rtsp_url || "");
+        const snapshot = {
+          cameraName: (camera.camera_name || "").trim(),
+          cameraIp: parsed.ip || (camera.host || ""),
+          cameraUsername: parsed.username,
+          cameraPassword: parsed.password,
+          cameraPort: parsed.port || String(camera.port || 554),
+          selectedUseCases: normalizeUseCasesForCompare(camera.use_cases ?? []),
+        };
+        setCameraName(snapshot.cameraName);
+        setCameraIp(snapshot.cameraIp);
+        setCameraUsername(snapshot.cameraUsername);
+        setCameraPassword(snapshot.cameraPassword);
+        setCameraPort(snapshot.cameraPort);
+        setSelectedUseCases(snapshot.selectedUseCases);
+        setInitialEditSnapshot(snapshot);
+      } catch {
+        toast({
+          title: "Unable to load camera",
+          description: "Could not load camera details for editing.",
+          variant: "destructive",
+        });
+      } finally {
+        setPrefilling(false);
+      }
+    };
+
+    void loadCameraForEdit();
+  }, [editCameraId, isEditing]);
 
   const toggleUseCase = (useCase: string) => {
     setSelectedUseCases((prev) =>
@@ -45,7 +135,30 @@ export default function LiveStream() {
     return `rtsp://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${ip}:${port}/stream1`;
   })();
 
+  const numericPort = Number(cameraPort);
+  const isPortValid = Number.isInteger(numericPort) && numericPort >= 1 && numericPort <= 65535;
+  const isConnectDisabled =
+    connecting
+    || prefilling
+    || !cameraName.trim()
+    || !cameraIp.trim()
+    || !cameraUsername.trim()
+    || !cameraPassword.trim()
+    || !cameraPort.trim()
+    || !isPortValid
+    || !generatedRtspUrl
+    || selectedUseCases.length === 0;
+
   const handleConnect = async () => {
+    if (!cameraName.trim()) {
+      toast({
+        title: "Camera name required",
+        description: "Enter a camera name.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     if (!cameraIp.trim()) {
       toast({
         title: "Camera IP required",
@@ -73,7 +186,6 @@ export default function LiveStream() {
       return;
     }
 
-    const numericPort = Number(cameraPort);
     if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) {
       toast({
         title: "Invalid camera port",
@@ -106,18 +218,52 @@ export default function LiveStream() {
     setConnectionMessage("");
 
     try {
-      const response = await connectCameraRtsp(generatedRtspUrl, cameraName, selectedUseCases);
+      if (isEditing && initialEditSnapshot) {
+        const currentSnapshot = {
+          cameraName: cameraName.trim(),
+          cameraIp: cameraIp.trim(),
+          cameraUsername: cameraUsername.trim(),
+          cameraPassword: cameraPassword.trim(),
+          cameraPort: cameraPort.trim(),
+          selectedUseCases: normalizeUseCasesForCompare(selectedUseCases),
+        };
+        const hasNoChanges =
+          currentSnapshot.cameraName === initialEditSnapshot.cameraName
+          && currentSnapshot.cameraIp === initialEditSnapshot.cameraIp
+          && currentSnapshot.cameraUsername === initialEditSnapshot.cameraUsername
+          && currentSnapshot.cameraPassword === initialEditSnapshot.cameraPassword
+          && currentSnapshot.cameraPort === initialEditSnapshot.cameraPort
+          && JSON.stringify(currentSnapshot.selectedUseCases) === JSON.stringify(initialEditSnapshot.selectedUseCases);
+
+        if (hasNoChanges) {
+          setIsConnected(true);
+          setConnectionMessage("Camera updated — No changes made.");
+          toast({
+            title: "Camera updated",
+            description: "Camera updated — No changes made.",
+            variant: "success",
+          });
+          return;
+        }
+      }
+
+      const response = isEditing
+        ? await updateConnectedCamera(editCameraId, generatedRtspUrl, cameraName.trim(), selectedUseCases)
+        : await connectCameraRtsp(generatedRtspUrl, cameraName.trim(), selectedUseCases);
       setIsConnected(true);
-      setConnectionMessage(response.message || "Camera connected successfully.");
+      setConnectionMessage(
+        response.message || (isEditing ? "Camera updated." : "Camera connected successfully."),
+      );
       toast({
-        title: "Camera connected",
-        description: response.message || `RTSP camera stream connected for ${selectedUseCases.join(", ")}.`,
+        title: isEditing ? "Camera updated" : "Camera connected",
+        description: response.message || (isEditing ? "Camera updated." : `RTSP camera stream connected for ${selectedUseCases.join(", ")}.`),
+        variant: isEditing ? "success" : "default",
       });
     } catch (error) {
       setIsConnected(false);
       setConnectionMessage("");
       toast({
-        title: "Camera connection failed",
+        title: isEditing ? "Camera update failed" : "Camera connection failed",
         description:
           error instanceof Error
             ? error.message
@@ -134,7 +280,9 @@ export default function LiveStream() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Live Stream</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Add camera details and connect using an auto-generated RTSP URL.
+          {isEditing
+            ? "Update camera details and save changes."
+            : "Add camera details and connect using an auto-generated RTSP URL."}
         </p>
       </div>
 
@@ -142,10 +290,12 @@ export default function LiveStream() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <Camera className="w-4 h-4" />
-            Connect Camera
+            {isEditing ? "Edit Camera" : "Connect Camera"}
           </CardTitle>
           <CardDescription>
-            Enter camera credentials and network details. The RTSP URL is generated automatically.
+            {isEditing
+              ? "Update camera credentials and network details. The RTSP URL is generated automatically."
+              : "Enter camera credentials and network details. The RTSP URL is generated automatically."}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -256,19 +406,29 @@ export default function LiveStream() {
           </div>
 
           <div className="flex items-center gap-3">
-            <Button onClick={handleConnect} disabled={connecting} className="gap-2">
+            <Button onClick={handleConnect} disabled={isConnectDisabled} className="gap-2">
               {connecting ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  Connecting...
+                  {isEditing ? "Updating..." : "Connecting..."}
                 </>
               ) : (
                 <>
                   <Wifi className="w-4 h-4" />
-                  Connect Camera
+                  {isEditing ? "Update Camera" : "Connect Camera"}
                 </>
               )}
             </Button>
+            {isEditing && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => navigate("/live-stream")}
+                disabled={connecting}
+              >
+                Cancel Edit
+              </Button>
+            )}
           </div>
         </CardContent>
       </Card>

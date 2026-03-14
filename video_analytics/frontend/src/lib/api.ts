@@ -46,6 +46,7 @@ interface CameraConnectResponse {
 interface ConnectedCamera {
   camera_id: string;
   camera_name?: string;
+  rtsp_url?: string;
   host?: string;
   port?: number;
   status?: string;
@@ -168,6 +169,25 @@ export async function getConnectedCamera(cameraId: string): Promise<ConnectedCam
 export async function deleteConnectedCamera(cameraId: string): Promise<void> {
   await requestJson<{ success: boolean; message: string }>(`/api/cameras/${cameraId}`, {
     method: "DELETE",
+  });
+}
+
+export async function updateConnectedCamera(
+  cameraId: string,
+  rtspUrl: string,
+  cameraName?: string,
+  useCases: string[] = ["person_count"],
+): Promise<CameraConnectResponse> {
+  return requestJson<CameraConnectResponse>(`/api/cameras/${cameraId}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      rtsp_url: rtspUrl,
+      camera_name: cameraName?.trim() || undefined,
+      use_cases: useCases,
+    }),
   });
 }
 

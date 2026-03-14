@@ -3,7 +3,7 @@ import os
 
 from app.core.config import EXECUTABLE_VIDEO_USE_CASES, FRAME_STRIDE, OUTPUT_DIR
 from app.services.store import normalize_use_cases, set_job_state, update_video_record
-from src.person_count.count import process_video
+from src.person_count import process_video
 
 
 def process_video_job(job_id, record_id, safe_name, input_path, use_cases=None):

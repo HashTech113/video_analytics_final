@@ -133,9 +133,13 @@ def pop_job_state(job_id):
         JOBS.pop(job_id, None)
 
 
-def set_connected_camera(camera_id: str, **camera_data):
+def set_connected_camera(camera_id: str, allow_create: bool = True, **camera_data):
     with camera_lock:
-        current = CONNECTED_CAMERAS.get(camera_id, {"camera_id": camera_id})
+        existing = CONNECTED_CAMERAS.get(camera_id)
+        if existing is None and not allow_create:
+            return None
+
+        current = existing or {"camera_id": camera_id}
         current.update(camera_data)
         current["updated_at"] = datetime.utcnow().isoformat()
         CONNECTED_CAMERAS[camera_id] = current

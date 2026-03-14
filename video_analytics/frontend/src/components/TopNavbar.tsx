@@ -50,7 +50,7 @@ export function TopNavbar({ onToggleSidebar }: TopNavbarProps) {
 
       <div className="absolute left-1/2 -translate-x-1/2 text-center leading-tight w-[72%] sm:w-auto">
         <p
-          className={`text-lg md:text-xl font-semibold tracking-widest text-blue-900 transition-all duration-700 ${
+          className={`text-lg md:text-xl font-semibold tracking-widest text-white transition-all duration-700 ${
             isVisible ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-1"
           }`}
           style={{ fontFamily: "'Times New Roman', Times, serif" }}

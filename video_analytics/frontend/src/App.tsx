@@ -8,7 +8,6 @@ import Dashboard from "./pages/Dashboard";
 import UploadVideo from "./pages/UploadVideo";
 import LiveStream from "./pages/LiveStream";
 import ProcessedVideoPage from "./pages/ProcessedVideo";
-import LiveVideoRecordsPage from "./pages/LiveVideoRecords";
 import LivePreviewsPage from "./pages/LivePreviews";
 import DataPage from "./pages/Data";
 import NotFound from "./pages/NotFound";
@@ -37,7 +36,6 @@ function PersistentRouteShell() {
   const isUpload = pathname === "/" || pathname === "/upload";
   const isLiveStream = pathname === "/live-stream";
   const isProcessedVideos = pathname === "/processed-video" || pathname === "/processed-video/processed-videos";
-  const isLiveVideos = pathname === "/processed-video/live-videos";
   const isLivePreviews = pathname === "/live-previews";
   const isData = pathname === "/data";
   const isAnalytics = pathname === "/analytics";
@@ -46,7 +44,6 @@ function PersistentRouteShell() {
     isUpload
     || isLiveStream
     || isProcessedVideos
-    || isLiveVideos
     || isLivePreviews
     || isData
     || isAnalytics
@@ -62,9 +59,6 @@ function PersistentRouteShell() {
       </MountedPage>
       <MountedPage active={isProcessedVideos}>
         <ProcessedVideoPage />
-      </MountedPage>
-      <MountedPage active={isLiveVideos}>
-        <LiveVideoRecordsPage />
       </MountedPage>
       <MountedPage active={isLivePreviews}>
         <LivePreviewsPage />
