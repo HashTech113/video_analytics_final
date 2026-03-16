@@ -42,23 +42,17 @@ function parseRange(range: string): { enter: string; exit: string } {
   return { enter: enter ?? "", exit: exit ?? "" };
 }
 
-function totalMinutes(ranges: string[]): number {
-  return ranges.reduce((acc, r) => {
-    const { enter, exit } = parseRange(r);
-    if (!enter || !exit || exit === "ongoing") return acc;
-    const toMin = (t: string) => {
-      const [h, m, s] = t.split(":").map(Number);
-      return h * 60 + m + (s ?? 0) / 60;
-    };
-    return acc + Math.max(0, toMin(exit) - toMin(enter));
-  }, 0);
+/** "HH:MM:SS" → "HH:MM" */
+function fmtHHMM(t: string): string {
+  if (!t || t === "ongoing") return t;
+  const parts = t.split(":");
+  return `${parts[0] ?? "00"}:${parts[1] ?? "00"}`;
 }
 
-function fmtDuration(minutes: number): string {
-  if (minutes <= 0) return "—";
-  const h = Math.floor(minutes / 60);
-  const m = Math.round(minutes % 60);
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+/** "YYYY-MM-DD" → "DD-MM-YYYY" */
+function fmtDate(d: string): string {
+  const [y, m, day] = d.split("-");
+  return `${day}-${m}-${y}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,14 +247,8 @@ export default function PersonActivityPage() {
                       <TableHead className="text-xs text-center border-r border-border/40">
                         In-Office Time
                       </TableHead>
-                      <TableHead className="text-xs text-center border-r border-border/40">
-                        Out-of-Office Time
-                      </TableHead>
-                      <TableHead className="text-xs text-center border-r border-border/40">
-                        All Ranges
-                      </TableHead>
                       <TableHead className="text-xs text-center">
-                        Total Time
+                        Out-of-Office Time
                       </TableHead>
                     </TableRow>
                   </TableHeader>
@@ -268,7 +256,7 @@ export default function PersonActivityPage() {
                     {records.length === 0 ? (
                       <TableRow>
                         <TableCell
-                          colSpan={8}
+                          colSpan={6}
                           className="py-8 text-center text-sm text-muted-foreground"
                         >
                           {dbAvailable
@@ -277,64 +265,95 @@ export default function PersonActivityPage() {
                         </TableCell>
                       </TableRow>
                     ) : (
-                      records.map((record, idx) => {
+                      records.flatMap((record, idx) => {
                         const sorted = [...(record.in_office_ranges ?? [])].sort();
-                        const firstEnter = sorted[0]
-                          ? parseRange(sorted[0]).enter
-                          : "—";
-                        const lastExit = sorted[sorted.length - 1]
-                          ? parseRange(sorted[sorted.length - 1]).exit
-                          : "—";
-                        const mins = totalMinutes(record.in_office_ranges ?? []);
+                        const rowCount = Math.max(1, sorted.length);
 
-                        return (
-                          <TableRow key={`${record.activity_date}-${record.person_label}-${idx}`}>
-                            <TableCell className="text-center text-sm font-medium border-r border-border/40">
-                              {idx + 1}
-                            </TableCell>
-                            <TableCell className="border-r border-border/40">
-                              <div className="flex items-center gap-2">
-                                <span className={`shrink-0 inline-block rounded px-1.5 py-0.5 text-xs font-semibold ${record.is_known ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>
-                                  {record.is_known ? "Known" : "Unknown"}
-                                </span>
-                                <span className="text-sm font-medium truncate max-w-[160px]">
-                                  {record.person_label}
-                                </span>
-                              </div>
-                            </TableCell>
-                            <TableCell className="text-sm text-muted-foreground border-r border-border/40">
-                              {record.camera_name}
-                            </TableCell>
-                            <TableCell className="text-sm text-center text-muted-foreground border-r border-border/40">
-                              {record.activity_date}
-                            </TableCell>
-                            <TableCell className="text-sm text-center font-mono border-r border-border/40">
-                              {firstEnter}
-                            </TableCell>
-                            <TableCell className="text-sm text-center font-mono border-r border-border/40">
-                              {lastExit === "ongoing" ? (
-                                <span className="text-emerald-600 font-semibold">Ongoing</span>
-                              ) : (
-                                lastExit
-                              )}
-                            </TableCell>
-                            <TableCell className="text-xs text-muted-foreground border-r border-border/40 max-w-[200px]">
-                              <div className="flex flex-wrap gap-1">
-                                {sorted.map((r, i) => (
-                                  <span
-                                    key={i}
-                                    className="inline-block bg-muted rounded px-1 py-0.5 font-mono whitespace-nowrap"
-                                  >
-                                    {r}
+                        if (sorted.length === 0) {
+                          return [
+                            <TableRow key={`${idx}-empty`}>
+                              <TableCell className="text-center text-sm font-medium border-r border-border/40 align-top">
+                                {idx + 1}
+                              </TableCell>
+                              <TableCell className="border-r border-border/40 align-top">
+                                <div className="flex flex-col gap-1">
+                                  <span className={`self-start inline-block rounded px-1.5 py-0.5 text-xs font-semibold ${record.is_known ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>
+                                    {record.is_known ? "Known" : "Unknown"}
                                   </span>
-                                ))}
-                              </div>
-                            </TableCell>
-                            <TableCell className="text-sm text-center font-mono font-medium">
-                              {fmtDuration(mins)}
-                            </TableCell>
-                          </TableRow>
-                        );
+                                  <span className="text-sm font-medium">{record.person_label}</span>
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-sm text-muted-foreground border-r border-border/40 align-top">
+                                {record.camera_name}
+                              </TableCell>
+                              <TableCell className="text-sm text-center text-muted-foreground border-r border-border/40 align-top">
+                                {fmtDate(record.activity_date)}
+                              </TableCell>
+                              <TableCell className="text-sm text-center font-mono border-r border-border/40">—</TableCell>
+                              <TableCell className="text-sm text-center font-mono">—</TableCell>
+                            </TableRow>,
+                          ];
+                        }
+
+                        return sorted.map((range, rangeIdx) => {
+                          const { enter, exit } = parseRange(range);
+                          const nextRange = sorted[rangeIdx + 1];
+                          const nextEnter = nextRange ? parseRange(nextRange).enter : null;
+
+                          const inOffice =
+                            exit === "ongoing"
+                              ? `${fmtHHMM(enter)} - Ongoing`
+                              : `${fmtHHMM(enter)} - ${fmtHHMM(exit)}`;
+
+                          const outOfOffice =
+                            nextEnter
+                              ? `${fmtHHMM(exit)} - ${fmtHHMM(nextEnter)}`
+                              : "—";
+
+                          return (
+                            <TableRow key={`${idx}-${rangeIdx}`}>
+                              {rangeIdx === 0 && (
+                                <>
+                                  <TableCell
+                                    rowSpan={rowCount}
+                                    className="text-center text-sm font-medium border-r border-border/40 align-top"
+                                  >
+                                    {idx + 1}
+                                  </TableCell>
+                                  <TableCell
+                                    rowSpan={rowCount}
+                                    className="border-r border-border/40 align-top"
+                                  >
+                                    <div className="flex flex-col gap-1">
+                                      <span className={`self-start inline-block rounded px-1.5 py-0.5 text-xs font-semibold ${record.is_known ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>
+                                        {record.is_known ? "Known" : "Unknown"}
+                                      </span>
+                                      <span className="text-sm font-medium">{record.person_label}</span>
+                                    </div>
+                                  </TableCell>
+                                  <TableCell
+                                    rowSpan={rowCount}
+                                    className="text-sm text-muted-foreground border-r border-border/40 align-top"
+                                  >
+                                    {record.camera_name}
+                                  </TableCell>
+                                  <TableCell
+                                    rowSpan={rowCount}
+                                    className="text-sm text-center text-muted-foreground border-r border-border/40 align-top"
+                                  >
+                                    {fmtDate(record.activity_date)}
+                                  </TableCell>
+                                </>
+                              )}
+                              <TableCell className="text-sm text-center font-mono border-r border-border/40">
+                                {inOffice}
+                              </TableCell>
+                              <TableCell className="text-sm text-center font-mono text-muted-foreground">
+                                {outOfOffice}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        });
                       })
                     )}
                   </TableBody>

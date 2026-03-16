@@ -2,9 +2,17 @@ import os
 import numpy as np
 import cv2
 
+# Absolute path to the dataset, resolved relative to this file so the backend
+# works correctly regardless of the working directory it is started from.
+_BACKEND_DIR = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+_DEFAULT_DATASET_PATH = os.path.join(_BACKEND_DIR, "dataset", "person_dataset")
+
 
 class FaceMatcher:
-    def __init__(self, recognizer, dataset_path="dataset/person_dataset"):
+    def __init__(self, recognizer, dataset_path=None):
+        dataset_path = dataset_path or _DEFAULT_DATASET_PATH
         self.recognizer = recognizer
         self.dataset_path = dataset_path
 

@@ -719,53 +719,6 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="bg-card rounded-lg border border-border animate-fade-in">
-            <div className="p-5 border-b border-border">
-              <h3 className="text-sm font-semibold">Processed Videos</h3>
-            </div>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="text-xs text-center border-r border-border/40">Sl. No.</TableHead>
-                  <TableHead className="text-xs text-center border-r border-border/40">person name</TableHead>
-                  <TableHead className="text-xs text-center border-r border-border/40">Date</TableHead>
-                  <TableHead className="text-xs text-center border-r border-border/40">In office time</TableHead>
-                  <TableHead className="text-xs text-center">Out of office time</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {dailyActivityRecords.map((record, index) => {
-                  const parsedRanges = (record.in_office_ranges ?? [])
-                    .map((range) => {
-                      const [start, end] = range.split("-", 2);
-                      return { start, end };
-                    })
-                    .filter((range) => range.start && range.end)
-                    .sort((a, b) => a.start.localeCompare(b.start));
-                  const inOfficeTime = parsedRanges[0]?.start ?? "N/A";
-                  const outOfficeTime = parsedRanges[parsedRanges.length - 1]?.end ?? "N/A";
-
-                  return (
-                    <TableRow key={`${record.activity_date}-${record.person_label}-${index}`}>
-                      <TableCell className="text-sm text-center font-medium border-r border-border/40">{index + 1}</TableCell>
-                      <TableCell className="text-sm border-r border-border/40">{record.person_label || "N/A"}</TableCell>
-                      <TableCell className="text-sm text-muted-foreground border-r border-border/40">{record.activity_date || "N/A"}</TableCell>
-                      <TableCell className="text-sm text-muted-foreground border-r border-border/40">{inOfficeTime}</TableCell>
-                      <TableCell className="text-sm text-muted-foreground">{outOfficeTime}</TableCell>
-                    </TableRow>
-                  );
-                })}
-                {dailyActivityRecords.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={5} className="text-sm text-muted-foreground py-6 text-center">
-                      No attendance records yet.
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </div>
-
           {connectedCameras.length > 0 && (
             <RecentUploadsTable
               title="Connected Cameras"

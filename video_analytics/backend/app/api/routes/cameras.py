@@ -238,7 +238,7 @@ class CameraFrameProcessor:
         self.last_unknown_count = 0
         self.face_tracks = []
         self.last_face_tracks_at = 0.0
-        self.max_face_track_stale_seconds = 2.0
+        self.max_face_track_stale_seconds = 10.0
         self.started_at = datetime.utcnow()
         self.last_store_update_at = 0.0
         self.tracker = ByteTrackFaceTracker(
@@ -263,6 +263,7 @@ class CameraFrameProcessor:
         try:
             result = _run_person_recognition(frame_copy)
         except Exception:
+            logger.exception("Face recognition worker error for camera_id=%s", self.camera_id)
             result = (0, 0, [])
         with self._recog_lock:
             self._recog_result = result
@@ -289,10 +290,15 @@ class CameraFrameProcessor:
                         known_count, unknown_count, face_results = self._recog_result
                         self.last_known_count = known_count
                         self.last_unknown_count = unknown_count
-                        self.face_tracks = face_results
-                        self.last_face_tracks_at = now
                         self._recog_result = None
                         new_face_results = face_results
+                        # Only overwrite face_tracks when detections are present.
+                        # Empty results (face momentarily not visible) must not
+                        # erase the last known names — the stale timer handles
+                        # clearing them when the person truly leaves the frame.
+                        if face_results:
+                            self.face_tracks = face_results
+                            self.last_face_tracks_at = now
 
                     # Fire a new recognition job if none is running and it is time
                     if not self._recog_running and self.frame_index % self.face_recognition_stride == 0:
@@ -418,18 +424,34 @@ class CameraFrameProcessor:
 
     def _face_label_for_person(self, person_bbox: list) -> str | None:
         """
-        Find a face recognition result whose face centre lies inside the
-        person bounding box.  Returns the label to show, or None if no
-        face match is found.
+        Match a face recognition result to this person bounding box and return
+        the label to display.
+
+        Strategy:
+          1. Expand the person bbox by 30 px on every side to tolerate YOLO
+             head-cropping and small temporal misalignments between the YOLO
+             frame and the recognition frame.
+          2. Among all face centres that fall inside the expanded box, pick the
+             one whose horizontal centre is closest to the person centre
+             (handles side-by-side people correctly).
 
         Label rules:
-          - Known person  →  name as recognised  (e.g. "Akash")
+          - Known person  →  recognised name  (e.g. "Akash")
           - Unknown face  →  "Unknown_<face_track_id>"
         """
         if not self.face_tracks:
             return None
 
         px1, py1, px2, py2 = map(int, person_bbox)
+        # Generous horizontal margin so faces are found even when YOLO and
+        # ArcFace bboxes are slightly misaligned across frames.
+        h_margin = 60
+        epx1 = px1 - h_margin
+        epx2 = px2 + h_margin
+        person_cx = (px1 + px2) // 2
+
+        best_label: str | None = None
+        best_dist = float("inf")
 
         for face in self.face_tracks:
             fbbox = face.get("bbox")
@@ -439,14 +461,24 @@ class CameraFrameProcessor:
             face_cx = (fx1 + fx2) // 2
             face_cy = (fy1 + fy2) // 2
 
-            if px1 <= face_cx <= px2 and py1 <= face_cy <= py2:
-                name = str(face.get("name", "")).strip()
-                face_id = face.get("id")
-                if name and name.lower() != "unknown":
-                    return name
-                return f"Unknown_{face_id}" if face_id is not None else "Unknown"
+            # Horizontal alignment check: face x-centre must be within the
+            # expanded body x-range.  We intentionally skip a strict y check
+            # because YOLO frequently clips the top of the body bbox at chin
+            # level, leaving the face centre above py1.  The only y guard is
+            # that the face must not be below the body bbox bottom (it would
+            # belong to a different person further down).
+            if epx1 <= face_cx <= epx2 and face_cy <= py2 + 30:
+                dist = abs(face_cx - person_cx)
+                if dist < best_dist:
+                    best_dist = dist
+                    name = str(face.get("name", "")).strip()
+                    face_id = face.get("id")
+                    if name and name.lower() != "unknown":
+                        best_label = name
+                    else:
+                        best_label = f"Unknown_{face_id}" if face_id is not None else "Unknown"
 
-        return None
+        return best_label
 
     def _draw_person_tracks(self, frame, now: float, enable_person_recognition: bool = False):
         """
@@ -653,8 +685,10 @@ def _get_recognition_service():
             recognition_module = importlib.import_module("src.person_recognition")
             recognition_service_class = getattr(recognition_module, "RecognitionService")
             RECOGNITION_SERVICE = recognition_service_class()
+            logger.info("RecognitionService initialised successfully")
             return RECOGNITION_SERVICE
         except Exception:
+            logger.exception("RecognitionService initialisation failed — person recognition disabled")
             RECOGNITION_SERVICE_INIT_FAILED = True
             return None
 
