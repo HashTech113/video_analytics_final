@@ -68,3 +68,7 @@ htmlcov/
 backend/uploads/
 backend/outputs/
 backend/logs/
+
+# Dataset artifacts
+backend/dataset/
+dataset/
