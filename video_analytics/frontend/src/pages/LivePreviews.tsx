@@ -2,18 +2,118 @@ import { useEffect, useRef, useState } from "react";
 import { Maximize2, MonitorPlay, MoreVertical, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { deleteConnectedCamera, getConnectedCameras, type ConnectedCamera } from "@/lib/api";
-import { toBackendAssetUrl } from "@/lib/http";
+import { API_BASE_URL, deleteConnectedCamera, getConnectedCameras, type ConnectedCamera } from "@/lib/api";
 import { toast } from "@/hooks/use-toast";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
+
+function LiveCameraPreview({
+  cameraId,
+  cameraName,
+  streamRetryTick,
+  streamError,
+  onStreamLoad,
+  onStreamError,
+  active,
+}: {
+  cameraId: string;
+  cameraName?: string;
+  streamRetryTick: number;
+  streamError: boolean;
+  onStreamLoad: () => void;
+  onStreamError: () => void;
+  active: boolean;
+}) {
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const onStreamLoadRef = useRef(onStreamLoad);
+  const onStreamErrorRef = useRef(onStreamError);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => { onStreamLoadRef.current = onStreamLoad; }, [onStreamLoad]);
+  useEffect(() => { onStreamErrorRef.current = onStreamError; }, [onStreamError]);
+
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!active) {
+      setLoaded(false);
+      if (img) img.src = "";
+      return;
+    }
+
+    setLoaded(false);
+    // Multipart stream: the browser holds one persistent connection and
+    // renders frames as they arrive — no per-frame request overhead.
+    img!.src = `${API_BASE_URL}/api/cameras/${encodeURIComponent(cameraId)}/stream?preview=true`;
+
+    // The multipart stream never fires onLoad (response never "completes"),
+    // so poll naturalWidth to detect when the first frame has rendered.
+    let stopped = false;
+    let checkTimer = 0;
+    let errorTimeout = 0;
+
+    const checkFrame = () => {
+      if (stopped) return;
+      if (img && img.naturalWidth > 0) {
+        setLoaded(true);
+        onStreamLoadRef.current();
+        return;
+      }
+      checkTimer = window.setTimeout(checkFrame, 150);
+    };
+    checkTimer = window.setTimeout(checkFrame, 300);
+
+    // Declare stream unavailable if no frame appears within 15 s.
+    errorTimeout = window.setTimeout(() => {
+      if (!stopped && img && img.naturalWidth === 0) {
+        onStreamErrorRef.current();
+      }
+    }, 15000);
+
+    return () => {
+      stopped = true;
+      window.clearTimeout(checkTimer);
+      window.clearTimeout(errorTimeout);
+      // Setting src="" closes the multipart stream connection immediately.
+      if (img) img.src = "";
+    };
+  }, [active, cameraId, streamRetryTick]);
+
+  return (
+    <>
+      <img
+        ref={imgRef}
+        alt={cameraName || "Live preview"}
+        className={`live-preview-image w-full h-[220px] object-contain${loaded ? "" : " hidden"}`}
+        onError={() => onStreamErrorRef.current()}
+      />
+      {!loaded && !streamError && active && (
+        <div className="w-full h-[220px] grid place-items-center text-sm text-muted-foreground">
+          Connecting live stream...
+        </div>
+      )}
+      {streamError && (
+        <div className="absolute inset-0 grid place-items-center px-4 text-center text-sm text-muted-foreground bg-black/70">
+          Stream unavailable. Verify backend is running on port 8000 and camera is reachable.
+        </div>
+      )}
+    </>
+  );
+}
 
 export default function LivePreviewsPage() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const normalizedPath = location.pathname.endsWith("/") && location.pathname !== "/"
+    ? location.pathname.slice(0, -1)
+    : location.pathname;
+  const isActiveRoute = normalizedPath === "/live-previews" || normalizedPath === "/live-preivews";
   const [cameras, setCameras] = useState<ConnectedCamera[]>([]);
   const [loading, setLoading] = useState(true);
   const [menuCameraId, setMenuCameraId] = useState<string | null>(null);
   const [deletingCameraId, setDeletingCameraId] = useState<string | null>(null);
+  const [streamErrors, setStreamErrors] = useState<Record<string, boolean>>({});
+  const [streamRetryTick, setStreamRetryTick] = useState<Record<string, number>>({});
   const previewRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const retryTimersRef = useRef<Record<string, number>>({});
   const pendingRemovalIdsRef = useRef<Set<string>>(new Set());
   const removedCameraIdsRef = useRef<Set<string>>(new Set());
   const backendConnectedRef = useRef(false);
@@ -28,6 +128,15 @@ export default function LivePreviewsPage() {
             && !removedCameraIdsRef.current.has(camera.camera_id),
         ),
       );
+      setStreamErrors((prev) => {
+        const next: Record<string, boolean> = {};
+        for (const camera of data) {
+          if (prev[camera.camera_id]) {
+            next[camera.camera_id] = true;
+          }
+        }
+        return next;
+      });
       if (showStatus || !backendConnectedRef.current) {
         toast({
           title: "Backend connected successfully",
@@ -39,7 +148,7 @@ export default function LivePreviewsPage() {
       backendConnectedRef.current = false;
       if (showStatus) {
         toast({
-          title: "Unable to connect backend",
+          title: "Waiting to connect backend",
           variant: "destructive",
         });
       }
@@ -54,14 +163,20 @@ export default function LivePreviewsPage() {
   };
 
   useEffect(() => {
+    if (!isActiveRoute) {
+      return;
+    }
+
     void fetchCameras(true);
     const intervalId = window.setInterval(() => {
       void fetchCameras(false);
-    }, 2500);
+    }, 10000);
     return () => {
       window.clearInterval(intervalId);
+      Object.values(retryTimersRef.current).forEach((timerId) => window.clearTimeout(timerId));
+      retryTimersRef.current = {};
     };
-  }, []);
+  }, [isActiveRoute]);
 
   const handleFullscreen = async (cameraId: string) => {
     const target = previewRefs.current[cameraId];
@@ -110,6 +225,16 @@ export default function LivePreviewsPage() {
       .split("_")
       .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
       .join(" ");
+
+  const scheduleStreamRetry = (cameraId: string) => {
+    if (retryTimersRef.current[cameraId]) {
+      return;
+    }
+    retryTimersRef.current[cameraId] = window.setTimeout(() => {
+      setStreamRetryTick((prev) => ({ ...prev, [cameraId]: (prev[cameraId] ?? 0) + 1 }));
+      delete retryTimersRef.current[cameraId];
+    }, 2000);
+  };
 
   return (
     <div className="space-y-6">
@@ -208,12 +333,26 @@ export default function LivePreviewsPage() {
                   ref={(el) => {
                     previewRefs.current[camera.camera_id] = el;
                   }}
-                  className="live-preview-container rounded-md overflow-hidden bg-black border border-border"
+                  className="live-preview-container relative rounded-md overflow-hidden bg-black border border-border"
                 >
-                  <img
-                    src={toBackendAssetUrl(`/api/cameras/${camera.camera_id}/stream`)}
-                    alt={camera.camera_name || "Live preview"}
-                    className="live-preview-image w-full h-[220px] object-contain"
+                  <LiveCameraPreview
+                    cameraId={camera.camera_id}
+                    cameraName={camera.camera_name}
+                    streamRetryTick={streamRetryTick[camera.camera_id] ?? 0}
+                    streamError={Boolean(streamErrors[camera.camera_id])}
+                    active={isActiveRoute}
+                    onStreamLoad={() => {
+                      const retryTimer = retryTimersRef.current[camera.camera_id];
+                      if (retryTimer) {
+                        window.clearTimeout(retryTimer);
+                        delete retryTimersRef.current[camera.camera_id];
+                      }
+                      setStreamErrors((prev) => ({ ...prev, [camera.camera_id]: false }));
+                    }}
+                    onStreamError={() => {
+                      setStreamErrors((prev) => ({ ...prev, [camera.camera_id]: true }));
+                      scheduleStreamRetry(camera.camera_id);
+                    }}
                   />
                 </div>
               </CardContent>

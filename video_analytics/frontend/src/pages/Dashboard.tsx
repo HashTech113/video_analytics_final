@@ -1,9 +1,20 @@
-import { Download, Search } from "lucide-react";
+import { Activity, Camera, Clock, Download, Film, Search, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { ProcessedVideoPanel } from "@/components/AnalyticsCharts";
+import { RecentUploadsTable } from "@/components/RecentUploadsTable";
+import { StatCard } from "@/components/StatCard";
 import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  API_BASE_URL,
   deleteConnectedCamera,
   deleteVideo,
   downloadReport,
@@ -39,6 +50,12 @@ interface SelectedCameraPreview {
   id: string;
   cameraName: string;
   streamUrl: string;
+}
+
+interface ActivityRecord {
+  activity_date: string;
+  person_label: string;
+  in_office_ranges: string[];
 }
 
 function pickBucketSizeSeconds(durationSeconds: number): { bucketSizeSeconds: number; granularity: TimelineGranularity } {
@@ -174,10 +191,12 @@ export default function Dashboard() {
   const [selectedSearchCameraId, setSelectedSearchCameraId] = useState<string | null>(null);
   const [isSearchExpanded, setIsSearchExpanded] = useState(false);
   const [liveCameraSeries, setLiveCameraSeries] = useState<SelectedVideoHourlyEntry[]>([]);
+  const [dailyActivityRecords, setDailyActivityRecords] = useState<ActivityRecord[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deletingCameraId, setDeletingCameraId] = useState<string | null>(null);
   const hasViewedVideo = selectedVideo !== null;
   const hasViewedLiveCamera = selectedCameraPreview !== null;
+  const today = new Date().toISOString().slice(0, 10);
 
   const fetchAnalytics = async (showConnectionToast = false) => {
     const statusToast = showConnectionToast
@@ -233,6 +252,24 @@ export default function Dashboard() {
   useEffect(() => {
     fetchAnalytics(true);
   }, []);
+
+  useEffect(() => {
+    const fetchDailyActivity = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/activity?activity_date=${today}`);
+        if (!response.ok) {
+          setDailyActivityRecords([]);
+          return;
+        }
+        const json = await response.json();
+        setDailyActivityRecords(Array.isArray(json?.data) ? json.data : []);
+      } catch {
+        setDailyActivityRecords([]);
+      }
+    };
+
+    void fetchDailyActivity();
+  }, [today]);
 
   const handleDownloadReport = async () => {
     try {
@@ -599,6 +636,153 @@ export default function Dashboard() {
             )}
           </CardContent>
         </Card>
+      )}
+
+      {loading ? (
+        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-4">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} className="bg-card rounded-lg border border-border p-5 animate-pulse h-24" />
+          ))}
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-4">
+            <StatCard title="Total Videos" value={analytics?.total_videos ?? 0} icon={Film} />
+            <StatCard title="Total Persons" value={analytics?.total_persons ?? 0} icon={Users} />
+            <StatCard title="Active Cameras" value={analytics?.active_cameras ?? 0} icon={Camera} />
+            <StatCard title="Today's Detections" value={analytics?.todays_detections ?? 0} icon={Activity} />
+            <StatCard
+              title="Processing Time"
+              value={formatProcessingTime(analytics?.total_processing_time_seconds)}
+              icon={Clock}
+            />
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+            <div className="xl:col-span-2">
+              <ProcessedVideoPanel
+                videoUrl={selectedVideo?.processedVideo}
+                videoName={selectedVideo?.videoName}
+                liveStreamUrl={selectedCameraPreview?.streamUrl}
+                liveCameraName={selectedCameraPreview?.cameraName}
+                liveCameraId={selectedCameraPreview?.id}
+              />
+            </div>
+            <div className="bg-card rounded-lg border border-border p-5 animate-fade-in space-y-3">
+              <h3 className="text-sm font-semibold">
+                {selectedLiveCamera ? "Live Camera Summary" : selectedVideo ? "Video Summary" : "Summary"}
+              </h3>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground">{selectedLiveCamera ? "Camera" : "Name"}</span>
+                  <span className="font-medium text-right truncate max-w-[60%]">{selectedSummary.cameraName}</span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground">IP Address</span>
+                  <span className="font-medium">{selectedSummary.cameraIp}</span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground">Date</span>
+                  <span className="font-medium">{selectedSummary.date}</span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground">Use Case</span>
+                  <span className="font-medium text-right max-w-[60%] truncate">{selectedSummary.useCase}</span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground">Person Count</span>
+                  <span className="font-bold font-mono">{selectedSummary.personCount}</span>
+                </div>
+                {selectedLiveCamera && (
+                  <>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted-foreground">Total Persons</span>
+                      <span className="font-medium">{selectedLiveCamera.total_person_count ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted-foreground">Processing Time</span>
+                      <span className="font-medium">{liveProcessingTime}</span>
+                    </div>
+                  </>
+                )}
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground">Status</span>
+                  <span className={`font-medium capitalize ${
+                    selectedSummary.status === "Live Stream" || selectedSummary.status === "Processed Completed"
+                      ? "text-emerald-600"
+                      : "text-muted-foreground"
+                  }`}>
+                    {selectedSummary.status}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-card rounded-lg border border-border animate-fade-in">
+            <div className="p-5 border-b border-border">
+              <h3 className="text-sm font-semibold">Processed Videos</h3>
+            </div>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="text-xs text-center border-r border-border/40">Sl. No.</TableHead>
+                  <TableHead className="text-xs text-center border-r border-border/40">person name</TableHead>
+                  <TableHead className="text-xs text-center border-r border-border/40">Date</TableHead>
+                  <TableHead className="text-xs text-center border-r border-border/40">In office time</TableHead>
+                  <TableHead className="text-xs text-center">Out of office time</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {dailyActivityRecords.map((record, index) => {
+                  const parsedRanges = (record.in_office_ranges ?? [])
+                    .map((range) => {
+                      const [start, end] = range.split("-", 2);
+                      return { start, end };
+                    })
+                    .filter((range) => range.start && range.end)
+                    .sort((a, b) => a.start.localeCompare(b.start));
+                  const inOfficeTime = parsedRanges[0]?.start ?? "N/A";
+                  const outOfficeTime = parsedRanges[parsedRanges.length - 1]?.end ?? "N/A";
+
+                  return (
+                    <TableRow key={`${record.activity_date}-${record.person_label}-${index}`}>
+                      <TableCell className="text-sm text-center font-medium border-r border-border/40">{index + 1}</TableCell>
+                      <TableCell className="text-sm border-r border-border/40">{record.person_label || "N/A"}</TableCell>
+                      <TableCell className="text-sm text-muted-foreground border-r border-border/40">{record.activity_date || "N/A"}</TableCell>
+                      <TableCell className="text-sm text-muted-foreground border-r border-border/40">{inOfficeTime}</TableCell>
+                      <TableCell className="text-sm text-muted-foreground">{outOfficeTime}</TableCell>
+                    </TableRow>
+                  );
+                })}
+                {dailyActivityRecords.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={5} className="text-sm text-muted-foreground py-6 text-center">
+                      No attendance records yet.
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </div>
+
+          {connectedCameras.length > 0 && (
+            <RecentUploadsTable
+              title="Connected Cameras"
+              emptyMessage="No connected cameras."
+              uploads={connectedCameras.map((camera) => ({
+                id: camera.camera_id,
+                videoName: camera.camera_name || camera.camera_id,
+                uploadDate: (camera.connected_at || camera.updated_at || "").split("T")[0] || "N/A",
+                useCases: camera.use_cases ?? [],
+                status: (camera.status === "connected" ? "connected" : "disconnected") as "connected" | "disconnected",
+              }))}
+              onView={handleViewCamera}
+              onDelete={handleDeleteCamera}
+              deletingId={deletingCameraId}
+            />
+          )}
+        </>
       )}
 
     </div>

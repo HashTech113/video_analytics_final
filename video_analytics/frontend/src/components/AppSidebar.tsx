@@ -26,7 +26,7 @@ const navItems: NavItem[] = [
     ],
   },
   { title: "Live Streams", url: "/live-previews", icon: RadioTower },
-  { title: "Analytics", url: "/analytics", icon: BarChart3 },
+{ title: "Analytics", url: "/analytics", icon: BarChart3 },
 ];
 
 

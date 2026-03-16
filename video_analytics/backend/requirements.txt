@@ -8,4 +8,4 @@ aiortc
 av
 insightface
 onnxruntime
-supervision
+supervision==0.18.0

@@ -113,78 +113,48 @@ export function ProcessedVideoPanel({
   liveCameraId,
 }: ProcessedVideoPanelProps) {
   const isLive = Boolean(liveStreamUrl);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [webrtcReady, setWebrtcReady] = useState(false);
-  const [webrtcFailed, setWebrtcFailed] = useState(false);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const [streamLoaded, setStreamLoaded] = useState(false);
+  const [streamError, setStreamError] = useState(false);
 
   useEffect(() => {
+    const img = imgRef.current;
     if (!isLive || !liveCameraId) {
-      setWebrtcReady(false);
-      setWebrtcFailed(false);
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
+      setStreamLoaded(false);
+      setStreamError(false);
+      if (img) img.src = "";
       return;
     }
 
-    let disposed = false;
-    const pc = new RTCPeerConnection();
-    setWebrtcReady(false);
-    setWebrtcFailed(false);
+    setStreamLoaded(false);
+    setStreamError(false);
+    img!.src = `${API_BASE_URL}/api/cameras/${encodeURIComponent(liveCameraId)}/stream?preview=true`;
 
-    const setup = async () => {
-      try {
-        pc.addTransceiver("video", { direction: "recvonly" });
-        pc.ontrack = (event) => {
-          if (disposed || !videoRef.current) return;
-          const [stream] = event.streams;
-          videoRef.current.srcObject = stream;
-          setWebrtcReady(true);
-        };
+    let stopped = false;
+    let checkTimer = 0;
+    let errorTimeout = 0;
 
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-
-        const response = await fetch(`${API_BASE_URL}/api/cameras/${liveCameraId}/webrtc-offer`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            sdp: offer.sdp,
-            type: offer.type,
-          }),
-        });
-
-        if (!response.ok) {
-          throw new Error("WebRTC signaling failed.");
-        }
-
-        const payload = await response.json();
-        const answer = payload?.data;
-        if (!answer?.sdp || !answer?.type) {
-          throw new Error("Invalid WebRTC answer payload.");
-        }
-
-        await pc.setRemoteDescription(answer);
-      } catch {
-        if (!disposed) {
-          setWebrtcReady(false);
-          setWebrtcFailed(true);
-        }
+    const checkFrame = () => {
+      if (stopped) return;
+      if (img && img.naturalWidth > 0) {
+        setStreamLoaded(true);
+        return;
       }
+      checkTimer = window.setTimeout(checkFrame, 150);
     };
+    checkTimer = window.setTimeout(checkFrame, 300);
 
-    setup();
+    errorTimeout = window.setTimeout(() => {
+      if (!stopped && img && img.naturalWidth === 0) {
+        setStreamError(true);
+      }
+    }, 15000);
 
     return () => {
-      disposed = true;
-      const stream = videoRef.current?.srcObject as MediaStream | null;
-      stream?.getTracks().forEach((track) => track.stop());
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
-      pc.close();
+      stopped = true;
+      window.clearTimeout(checkTimer);
+      window.clearTimeout(errorTimeout);
+      if (img) img.src = "";
     };
   }, [isLive, liveCameraId]);
 
@@ -192,20 +162,21 @@ export function ProcessedVideoPanel({
     <div className="bg-card rounded-lg border border-border p-5 animate-fade-in">
       <h3 className="text-sm font-semibold mb-4">{isLive ? "Live Stream" : "Processed Video"}</h3>
       {liveStreamUrl ? (
-        <div className="rounded-md overflow-hidden bg-black">
-          {webrtcReady ? (
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-[280px] object-contain"
-            />
-          ) : webrtcFailed ? (
-            <img src={liveStreamUrl} alt={liveCameraName || "Live stream"} className="w-full h-[280px] object-contain" />
-          ) : (
+        <div className="relative rounded-md overflow-hidden bg-black">
+          <img
+            ref={imgRef}
+            alt={liveCameraName || "Live stream"}
+            className={`w-full h-[280px] object-contain${streamLoaded ? "" : " hidden"}`}
+            onError={() => setStreamError(true)}
+          />
+          {!streamLoaded && !streamError && (
             <div className="w-full h-[280px] grid place-items-center text-sm text-muted-foreground">
               Connecting live stream...
+            </div>
+          )}
+          {streamError && (
+            <div className="absolute inset-0 grid place-items-center px-4 text-center text-sm text-muted-foreground bg-black/70">
+              Stream unavailable. Verify backend is running on port 8000 and camera is reachable.
             </div>
           )}
         </div>

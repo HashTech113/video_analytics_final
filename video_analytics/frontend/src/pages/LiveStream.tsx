@@ -438,8 +438,11 @@ export default function LiveStream() {
           <CardHeader>
             <CardTitle className="text-base">Camera Connected</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
             <p className="text-sm text-muted-foreground">{connectionMessage}</p>
+            <Button onClick={() => navigate("/live-previews")}>
+              Go to Live Previews
+            </Button>
           </CardContent>
         </Card>
       )}

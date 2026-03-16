@@ -11,7 +11,9 @@ Thumbs.db
 .env
 .env.*
 !.env.example
-frontend/.env.local
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
 backend/.env
 backend/.env.*
 !backend/.env.example
@@ -26,12 +28,12 @@ pnpm-debug.log*
 # Python backend
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
 .python-version
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tox/
+.nox/
 .venv/
 venv/
 env/
@@ -52,22 +54,17 @@ frontend/.vite/
 frontend/.cache/
 .eslintcache
 
-# Coverage / reports
-coverage/
-*.coverage
-.coverage*
-htmlcov/
-
 # TypeScript / bundlers
 *.tsbuildinfo
 .parcel-cache/
 
-# Notebook / local data artifacts
-.ipynb_checkpoints/
-backend/dataset/
+# Coverage / reports
+coverage/
+.coverage
+.coverage*
+htmlcov/
 
-# Binary/media artifacts
-*.mp4
-*.avi
-*.mov
-*.mkv
+# Runtime artifacts
+backend/uploads/
+backend/outputs/
+backend/logs/

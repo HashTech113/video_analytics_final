@@ -11,9 +11,12 @@ Thumbs.db
 .env
 .env.*
 !.env.example
-frontend/.env.local
-backend/.env
-backend/.env.*
+video_analytics/backend/.env
+video_analytics/backend/.env.*
+!video_analytics/backend/.env.example
+video_analytics/frontend/.env
+video_analytics/frontend/.env.*
+!video_analytics/frontend/.env.example
 
 # Logs
 *.log
@@ -22,51 +25,39 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Python backend
+# Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
 .python-version
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tox/
+.nox/
 .venv/
 venv/
 env/
-backend/.venv/
-backend/venv/
-backend/__pycache__/
-backend/.pytest_cache/
 
-# Backend generated files
-backend/uploads/
-backend/outputs/
-video_analytics/backend/uploads/
-video_analytics/backend/outputs/
-
-# Frontend
+# Node / frontend
 node_modules/
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
-frontend/.cache/
+dist/
+.vite/
+.cache/
 .eslintcache
-video_analytics/frontend/node_modules/
-video_analytics/frontend/dist/
-video_analytics/frontend/.vite/
-video_analytics/frontend/.cache/
-
-# Nested project virtualenv / env files
-video_analytics/backend/.venv/
-video_analytics/backend/venv/
-video_analytics/backend/.env
-video_analytics/backend/.env.*
-!video_analytics/backend/.env.example
-video_analytics/frontend/.env.local
+*.tsbuildinfo
 
 # Coverage / reports
 coverage/
-*.coverage
+.coverage
 .coverage*
 htmlcov/
+
+# Build/runtime artifacts in this repo
+video_analytics/backend/uploads/
+video_analytics/backend/outputs/
+video_analytics/backend/logs/
+video_analytics/backend/.venv/
+video_analytics/backend/venv/
+video_analytics/frontend/node_modules/
+video_analytics/frontend/dist/
+video_analytics/frontend/.vite/

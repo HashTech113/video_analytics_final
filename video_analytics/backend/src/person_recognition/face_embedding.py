@@ -1,10 +1,12 @@
 import insightface
-import numpy as np
 
 
 class ArcFaceRecognizer:
     def __init__(self):
-        self.model = insightface.app.FaceAnalysis(name="buffalo_l")
+        self.model = insightface.app.FaceAnalysis(
+            name="buffalo_l",
+            providers=["CPUExecutionProvider"],
+        )
         self.model.prepare(ctx_id=-1, det_size=(640, 640))
 
     def get_embeddings(self, frame):

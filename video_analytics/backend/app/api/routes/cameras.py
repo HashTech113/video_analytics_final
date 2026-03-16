@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime
 from fractions import Fraction
 import importlib
+import logging
 import os
 from threading import Event, Lock, Thread
 from time import monotonic, sleep
@@ -9,8 +10,9 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
 import cv2
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+import numpy as np
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.core.config import SUPPORTED_USE_CASES
@@ -27,6 +29,7 @@ from src.person_recognition.bytetrack_tracker import ByteTrackFaceTracker
 
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
 
 CAMERA_PEER_CONNECTIONS: dict[str, set] = {}
 CAMERA_STREAMS: dict[str, "CameraStream"] = {}
@@ -55,26 +58,63 @@ class WebRTCOfferRequest(BaseModel):
 
 
 class CameraStream:
-    def __init__(self, camera_id: str, rtsp_url: str):
+    def __init__(
+        self,
+        camera_id: str,
+        rtsp_url: str,
+        enable_person_count: bool,
+        enable_person_recognition: bool,
+    ):
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
+        self.enable_person_count = enable_person_count
+        self.enable_person_recognition = enable_person_recognition
         self.stop_event = Event()
         self.frame_lock = Lock()
+        # Separate lock for the raw (unprocessed) frame slot so the
+        # capture thread never waits on YOLO/annotation work.
+        self.raw_frame_lock = Lock()
 
         self.frame = None
+        self.processed_frame = None
         self.last_frame_at = 0.0
         self.source_fps = 0.0
+        # Single-slot buffer: capture thread always overwrites with the
+        # latest frame; process thread consumes it and sets it back to None.
+        self._raw_frame = None
 
-        self.processor = CameraFrameProcessor(camera_id=camera_id)
+        try:
+            self.processor = (
+                CameraFrameProcessor(camera_id=camera_id)
+                if (enable_person_count or enable_person_recognition)
+                else None
+            )
+        except Exception:
+            logger.exception("Camera processor init failed for camera_id=%s; continuing with raw frames", camera_id)
+            self.processor = None
 
-        self.thread = Thread(
-            target=self._run,
+        # Two threads:
+        #  • capture_thread — drains the RTSP buffer continuously, always
+        #    keeping only the newest raw frame so nothing accumulates.
+        #  • process_thread — picks up the latest raw frame, runs YOLO /
+        #    ByteTrack / annotation, and stores the result.  When YOLO is
+        #    slow (100 ms+), the capture thread keeps running so the next
+        #    processed frame is always the most recent one available.
+        self.capture_thread = Thread(
+            target=self._capture_run,
             daemon=True,
-            name=f"camera-stream-{camera_id}",
+            name=f"camera-capture-{camera_id}",
         )
-        self.thread.start()
+        self.process_thread = Thread(
+            target=self._process_run,
+            daemon=True,
+            name=f"camera-process-{camera_id}",
+        )
+        self.capture_thread.start()
+        self.process_thread.start()
 
-    def _run(self):
+    def _capture_run(self):
+        """Continuously reads RTSP at full speed, keeping only the latest frame."""
         capture = _create_rtsp_capture(self.rtsp_url)
         failures = 0
 
@@ -93,19 +133,50 @@ class CameraStream:
                     sleep(0.15)
                     capture = _create_rtsp_capture(self.rtsp_url)
                     failures = 0
-                sleep(0.02)
+                sleep(0.01)
                 continue
 
             failures = 0
             fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
-
-            with self.frame_lock:
-                self.frame = frame.copy()
-                self.last_frame_at = datetime.utcnow().timestamp()
+            with self.raw_frame_lock:
+                # Always overwrite — the process thread will pick up the
+                # newest frame the next time it is ready.
+                self._raw_frame = frame
                 if fps > 0:
                     self.source_fps = fps
 
         capture.release()
+
+    def _process_run(self):
+        """Grabs the latest raw frame, annotates it, and stores the result."""
+        while not self.stop_event.is_set():
+            with self.raw_frame_lock:
+                frame = self._raw_frame
+                self._raw_frame = None  # mark consumed
+
+            if frame is None:
+                sleep(0.01)
+                continue
+
+            processed_frame = frame
+            if self.processor is not None:
+                try:
+                    processed_frame = self.processor.process(
+                        frame=frame,
+                        enable_person_count=self.enable_person_count,
+                        enable_person_recognition=self.enable_person_recognition,
+                    )
+                except Exception:
+                    logger.exception("Camera frame processing failed for camera_id=%s; serving raw frame", self.camera_id)
+                    processed_frame = frame
+
+            frame_copy = frame.copy()
+            processed_copy = processed_frame.copy() if processed_frame is not frame else frame_copy.copy()
+
+            with self.frame_lock:
+                self.frame = frame_copy
+                self.processed_frame = processed_copy
+                self.last_frame_at = datetime.utcnow().timestamp()
 
     def get_frame_copy(self):
         with self.frame_lock:
@@ -113,14 +184,32 @@ class CameraStream:
                 return None
             return self.frame.copy()
 
+    def get_processed_frame_copy(self):
+        with self.frame_lock:
+            if self.processed_frame is None:
+                return None
+            return self.processed_frame.copy()
+
     def get_source_fps(self) -> float:
         with self.frame_lock:
             return self.source_fps
 
+    def seconds_since_last_frame(self) -> float:
+        with self.frame_lock:
+            last_frame_at = self.last_frame_at
+        if last_frame_at <= 0:
+            return float("inf")
+        return max(0.0, datetime.utcnow().timestamp() - last_frame_at)
+
+    def is_stale(self, max_age_seconds: float = 8.0) -> bool:
+        return self.seconds_since_last_frame() > max_age_seconds
+
     def stop(self):
         self.stop_event.set()
-        if self.thread.is_alive():
-            self.thread.join(timeout=2.0)
+        if self.capture_thread.is_alive():
+            self.capture_thread.join(timeout=2.0)
+        if self.process_thread.is_alive():
+            self.process_thread.join(timeout=2.0)
 
 
 class CameraFrameProcessor:
@@ -136,9 +225,10 @@ class CameraFrameProcessor:
         self.lock = Lock()
 
         self.frame_index = 0
-        self.detection_frame_stride = 2
-        self.max_track_stale_seconds = 0.8
-        self.max_missing_detection_cycles = 5
+        self.detection_frame_stride = 3
+        self.face_recognition_stride = 12
+        self.max_track_stale_seconds = 3.0
+        self.max_missing_detection_cycles = 8
         self.missing_detection_cycles = 0
         self.last_tracks_at = 0.0
         self.person_tracks = []
@@ -148,8 +238,9 @@ class CameraFrameProcessor:
         self.last_unknown_count = 0
         self.face_tracks = []
         self.last_face_tracks_at = 0.0
-        self.max_face_track_stale_seconds = 0.8
+        self.max_face_track_stale_seconds = 2.0
         self.started_at = datetime.utcnow()
+        self.last_store_update_at = 0.0
         self.tracker = ByteTrackFaceTracker(
             track_thresh=0.25,
             track_buffer=30,
@@ -157,9 +248,25 @@ class CameraFrameProcessor:
             frame_rate=30,
             fallback_iou_threshold=0.3,
             fallback_center_distance_threshold=120,
-            smoothing_alpha=0.6,
+            smoothing_alpha=0.75,
         )
         self.counter = PersonCounter(min_hits=3, max_idle_seconds=2.0)
+
+        # Face recognition runs in a dedicated daemon thread so it never blocks
+        # the main frame-processing loop (ArcFace on CPU can take 500 ms – 2 s).
+        self._recog_lock = Lock()
+        self._recog_running = False
+        self._recog_result: tuple | None = None  # (known, unknown, face_results)
+
+    def _recognition_worker(self, frame_copy) -> None:
+        """Run face recognition in a background daemon thread."""
+        try:
+            result = _run_person_recognition(frame_copy)
+        except Exception:
+            result = (0, 0, [])
+        with self._recog_lock:
+            self._recog_result = result
+            self._recog_running = False
 
     def process(self, frame, enable_person_count: bool, enable_person_recognition: bool):
         with self.lock:
@@ -172,14 +279,40 @@ class CameraFrameProcessor:
                 else:
                     self._predict_person_tracks(now)
 
-            if enable_person_recognition and self.frame_index % 4 == 0:
-                known_count, unknown_count, face_results = _run_person_recognition(frame)
-                self.last_known_count = known_count
-                self.last_unknown_count = unknown_count
-                self.face_tracks = face_results
-                self.last_face_tracks_at = now
+            if enable_person_recognition:
+                # Collect result from the background thread if it finished.
+                # Extract new_face_results outside the lock so the activity
+                # tracker's DB writes never hold _recog_lock.
+                new_face_results = None
+                with self._recog_lock:
+                    if self._recog_result is not None:
+                        known_count, unknown_count, face_results = self._recog_result
+                        self.last_known_count = known_count
+                        self.last_unknown_count = unknown_count
+                        self.face_tracks = face_results
+                        self.last_face_tracks_at = now
+                        self._recog_result = None
+                        new_face_results = face_results
 
-            if not enable_person_recognition:
+                    # Fire a new recognition job if none is running and it is time
+                    if not self._recog_running and self.frame_index % self.face_recognition_stride == 0:
+                        self._recog_running = True
+                        Thread(
+                            target=self._recognition_worker,
+                            args=(frame.copy(),),
+                            daemon=True,
+                        ).start()
+
+                # Update presence tracking whenever a fresh recognition result arrived.
+                if new_face_results is not None:
+                    try:
+                        from app.services.activity_tracker import update_presence
+                        _cam = get_connected_camera(self.camera_id)
+                        _cam_name = (_cam or {}).get("camera_name") or self.camera_id
+                        update_presence(self.camera_id, _cam_name, new_face_results)
+                    except Exception:
+                        pass  # tracking errors must never affect frame processing
+            else:
                 self.face_tracks = []
 
             self._prune_stale_tracks(now)
@@ -198,7 +331,7 @@ class CameraFrameProcessor:
             _draw_top_right_metrics(annotated, metrics)
 
             elapsed_seconds = int((datetime.utcnow() - self.started_at).total_seconds())
-            if enable_person_count and self.frame_index % 5 == 0:
+            if enable_person_count and (now - self.last_store_update_at) >= 1.0:
                 set_connected_camera(
                     self.camera_id,
                     allow_create=False,
@@ -207,6 +340,7 @@ class CameraFrameProcessor:
                     total_frames=self.frame_index,
                     processing_time_seconds=max(elapsed_seconds, 0),
                 )
+                self.last_store_update_at = now
 
             return annotated
 
@@ -214,9 +348,19 @@ class CameraFrameProcessor:
         return self.frame_index == 1 or (self.frame_index % self.detection_frame_stride) == 0
 
     def _update_person_tracks(self, frame, now: float):
+        # Resize to 640 wide for detection — YOLO internally resizes anyway but
+        # doing it explicitly cuts Python-level preprocessing time by ~4-8× on
+        # high-resolution camera feeds (1080p → 640p = ~9× fewer pixels).
+        h, w = frame.shape[:2]
+        scale = 1.0
+        det_frame = frame
+        if w > 640:
+            scale = 640.0 / w
+            det_frame = cv2.resize(frame, (640, max(1, int(h * scale))), interpolation=cv2.INTER_LINEAR)
+
         try:
             step = run_tracked_count_step(
-                frame=frame,
+                frame=det_frame,
                 tracker=self.tracker,
                 counter=self.counter,
                 confidence_threshold=0.25,
@@ -224,6 +368,14 @@ class CameraFrameProcessor:
             tracks = step["tracks"]
             counts = step["counts"]
             detection_count = int(step.get("detection_count", 0))
+
+            # Scale bboxes back to original-frame coordinates so annotations
+            # are drawn at the correct position on the full-resolution frame.
+            if scale != 1.0:
+                inv = 1.0 / scale
+                for track in tracks:
+                    if track.bbox and len(track.bbox) == 4:
+                        track.bbox = [int(v * inv) for v in track.bbox]
         except Exception:
             tracks = []
             counts = {"current": 0, "entered": self.total_person_count}
@@ -249,17 +401,13 @@ class CameraFrameProcessor:
             self.counter.update([])
             return
 
-        try:
-            tracks = self.tracker.update([], scores=[])
-            counts = self.counter.update(tracks)
-        except Exception:
-            tracks = self.person_tracks
-            counts = {"current": len(tracks), "entered": self.total_person_count}
-
-        self.person_tracks = tracks
+        # Preserve last known tracks without feeding empty detections to
+        # ByteTrack — calling tracker.update([], []) would age out / drop
+        # tracks between detection frames, which is what was causing the
+        # bounding-box blinking effect.  Boxes stay at their last detected
+        # position until the next detection frame updates them.
         self.last_tracks_at = now
-        self.last_person_count = int(counts.get("current", len(tracks)))
-        self.total_person_count = int(counts.get("entered", self.total_person_count))
+        self.last_person_count = len(self.person_tracks)
 
     def _prune_stale_tracks(self, now: float):
         if (now - self.last_tracks_at) > self.max_track_stale_seconds:
@@ -321,14 +469,30 @@ class CameraFrameProcessor:
             )
 
 
-def _ensure_camera_stream(camera_id: str, rtsp_url: str) -> CameraStream:
+def _ensure_camera_stream(
+    camera_id: str,
+    rtsp_url: str,
+    enable_person_count: bool,
+    enable_person_recognition: bool,
+) -> CameraStream:
     with CAMERA_STREAMS_LOCK:
         stream = CAMERA_STREAMS.get(camera_id)
-        if stream and stream.rtsp_url == rtsp_url and stream.thread.is_alive():
+        if (
+            stream
+            and stream.rtsp_url == rtsp_url
+            and stream.enable_person_count == enable_person_count
+            and stream.enable_person_recognition == enable_person_recognition
+            and stream.capture_thread.is_alive()
+        ):
             return stream
         if stream:
             stream.stop()
-        stream = CameraStream(camera_id=camera_id, rtsp_url=rtsp_url)
+        stream = CameraStream(
+            camera_id=camera_id,
+            rtsp_url=rtsp_url,
+            enable_person_count=enable_person_count,
+            enable_person_recognition=enable_person_recognition,
+        )
         CAMERA_STREAMS[camera_id] = stream
         return stream
 
@@ -338,6 +502,13 @@ def _stop_camera_stream(camera_id: str):
         stream = CAMERA_STREAMS.pop(camera_id, None)
     if stream:
         stream.stop()
+        try:
+            from app.services.activity_tracker import flush_camera
+            _cam = get_connected_camera(camera_id)
+            _cam_name = (_cam or {}).get("camera_name") or camera_id
+            flush_camera(camera_id, _cam_name)
+        except Exception:
+            pass
 
 
 def stop_all_camera_streams():
@@ -377,11 +548,16 @@ def _create_rtsp_capture(rtsp_url: str):
         "OPENCV_FFMPEG_CAPTURE_OPTIONS",
         os.getenv(
             "RTSP_FFMPEG_CAPTURE_OPTIONS",
-            "rtsp_transport;tcp|fflags;discardcorrupt|flags;low_delay|max_delay;500000|stimeout;5000000",
+            "rtsp_transport;tcp|fflags;discardcorrupt|flags;low_delay|max_delay;200000|reorder_queue_size;0|stimeout;5000000",
         ),
     )
 
     capture = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+    if not capture.isOpened():
+        capture.release()
+        # Some environments cannot open network streams with CAP_FFMPEG explicitly.
+        # Retry with OpenCV's default backend selection.
+        capture = cv2.VideoCapture(rtsp_url)
     if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
@@ -487,23 +663,23 @@ def _annotate_frame_for_camera(
     enable_person_recognition: bool,
     retries: int = 20,
 ):
-    shared_stream = _ensure_camera_stream(camera_id, rtsp_url)
+    shared_stream = _ensure_camera_stream(
+        camera_id,
+        rtsp_url,
+        enable_person_count=enable_person_count,
+        enable_person_recognition=enable_person_recognition,
+    )
 
     frame = None
     for _ in range(retries):
-        frame = shared_stream.get_frame_copy()
+        frame = shared_stream.get_processed_frame_copy()
         if frame is not None:
             break
         sleep(0.02)
 
     if frame is None:
         return None
-
-    return shared_stream.processor.process(
-        frame=frame,
-        enable_person_count=enable_person_count,
-        enable_person_recognition=enable_person_recognition,
-    )
+    return frame
 
 
 def _create_webrtc_track(camera_id: str, rtsp_url: str, enable_person_count: bool, enable_person_recognition: bool):
@@ -545,7 +721,10 @@ def _create_webrtc_track(camera_id: str, rtsp_url: str, enable_person_count: boo
             )
 
             if frame is None:
-                raise MediaStreamError
+                # Send a black placeholder instead of terminating the stream.
+                # This keeps the WebRTC session alive while the camera warms up
+                # or recovers from a momentary read failure.
+                frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
             video_frame = VideoFrame.from_ndarray(frame, format="bgr24")
             video_frame.pts = pts
@@ -559,24 +738,76 @@ def _create_webrtc_track(camera_id: str, rtsp_url: str, enable_person_count: boo
     return CameraVideoTrack()
 
 
-def _generate_mjpeg_frames(camera_id: str, rtsp_url: str, enable_person_count: bool, enable_person_recognition: bool):
+def _generate_mjpeg_frames(
+    camera_id: str,
+    rtsp_url: str,
+    enable_person_count: bool,
+    enable_person_recognition: bool,
+    target_fps: float = 25.0,
+    jpeg_quality: int = 82,
+    max_width: int | None = None,
+):
+    # Obtain (or create) the shared stream once — subsequent calls in the loop
+    # are just a fast dict lookup so the per-frame overhead is negligible.
+    stream = _ensure_camera_stream(camera_id, rtsp_url, enable_person_count, enable_person_recognition)
+
+    consecutive_failures = 0
+    min_frame_interval = 1.0 / max(target_fps, 1.0)
+    next_emit_at = monotonic()
+
     while True:
-        frame = _annotate_frame_for_camera(
-            camera_id=camera_id,
-            rtsp_url=rtsp_url,
-            enable_person_count=enable_person_count,
-            enable_person_recognition=enable_person_recognition,
-        )
-        if frame is None:
+        try:
+            # Read the latest already-processed frame directly — no retry
+            # loop, no blocking.  The process thread keeps this updated at
+            # camera speed so we always get a fresh result.
+            if not stream.capture_thread.is_alive():
+                stream = _ensure_camera_stream(camera_id, rtsp_url, enable_person_count, enable_person_recognition)
+
+            frame = stream.get_processed_frame_copy()
+        except GeneratorExit:
+            break
+        except Exception:
+            consecutive_failures += 1
+            if consecutive_failures == 1 or consecutive_failures % 25 == 0:
+                logger.exception(
+                    "Live preview frame generation failed for camera_id=%s (failures=%s)",
+                    camera_id,
+                    consecutive_failures,
+                )
             sleep(0.05)
             continue
 
-        ok, buffer = cv2.imencode(".jpg", frame)
+        if frame is None:
+            consecutive_failures += 1
+            sleep(0.05)
+            continue
+
+        if max_width and max_width > 0:
+            try:
+                height, width = frame.shape[:2]
+                if width > max_width:
+                    resized_height = int((height * max_width) / width)
+                    frame = cv2.resize(frame, (max_width, max(1, resized_height)), interpolation=cv2.INTER_AREA)
+            except Exception:
+                pass
+
+        consecutive_failures = 0
+        try:
+            ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, int(jpeg_quality)])
+        except Exception:
+            sleep(0.05)
+            continue
         if not ok:
             continue
 
         frame_bytes = buffer.tobytes()
         yield b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
+        next_emit_at += min_frame_interval
+        sleep_for = next_emit_at - monotonic()
+        if sleep_for > 0:
+            sleep(sleep_for)
+        else:
+            next_emit_at = monotonic()
 
 
 @router.post("/cameras/connect")
@@ -603,7 +834,12 @@ async def connect_camera(payload: CameraConnectRequest):
     camera_name = (payload.camera_name or "").strip() or f"Camera-{camera_id[:8]}"
     safe_stream_url = f"rtsp://{parsed.hostname}:{parsed.port or 554}{parsed.path or ''}"
 
-    _ensure_camera_stream(camera_id=camera_id, rtsp_url=verified_rtsp_url)
+    _ensure_camera_stream(
+        camera_id=camera_id,
+        rtsp_url=verified_rtsp_url,
+        enable_person_count="person_count" in normalized_use_cases,
+        enable_person_recognition="person_recognition" in normalized_use_cases,
+    )
     camera = set_connected_camera(
         camera_id,
         camera_name=camera_name,
@@ -656,7 +892,12 @@ async def update_camera(camera_id: str, payload: CameraUpdateRequest):
     )
     safe_stream_url = f"rtsp://{parsed.hostname}:{parsed.port or 554}{parsed.path or ''}"
 
-    _ensure_camera_stream(camera_id=camera_id, rtsp_url=verified_rtsp_url)
+    _ensure_camera_stream(
+        camera_id=camera_id,
+        rtsp_url=verified_rtsp_url,
+        enable_person_count="person_count" in normalized_use_cases,
+        enable_person_recognition="person_recognition" in normalized_use_cases,
+    )
     updated_camera = set_connected_camera(
         camera_id,
         camera_name=camera_name,
@@ -708,7 +949,10 @@ async def get_camera(camera_id: str):
 
 
 @router.get("/cameras/{camera_id}/stream")
-async def get_camera_stream(camera_id: str):
+async def get_camera_stream(
+    camera_id: str,
+    preview: bool = Query(default=False),
+):
     camera = get_connected_camera(camera_id)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found.")
@@ -717,18 +961,75 @@ async def get_camera_stream(camera_id: str):
     if not rtsp_url:
         raise HTTPException(status_code=400, detail="Camera stream URL not available.")
 
+    enable_person_count = "person_count" in normalize_use_cases(camera.get("use_cases"))
+    enable_person_recognition = "person_recognition" in normalize_use_cases(camera.get("use_cases"))
+
+    target_fps = 25.0
+    jpeg_quality = 82
+    max_width = None
+    if preview:
+        target_fps = 25.0
+        jpeg_quality = 82
+        max_width = 1280
+
     return StreamingResponse(
         _generate_mjpeg_frames(
             camera_id,
             rtsp_url,
-            enable_person_count="person_count" in normalize_use_cases(camera.get("use_cases")),
-            enable_person_recognition="person_recognition" in normalize_use_cases(camera.get("use_cases")),
+            enable_person_count=enable_person_count,
+            enable_person_recognition=enable_person_recognition,
+            target_fps=target_fps,
+            jpeg_quality=jpeg_quality,
+            max_width=max_width,
         ),
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={
             "Cache-Control": "no-store",
             "Pragma": "no-cache",
         },
+    )
+
+
+@router.get("/cameras/{camera_id}/snapshot")
+async def get_camera_snapshot(camera_id: str):
+    """Return a single annotated JPEG frame for the camera (used by the frontend polling loop).
+
+    This endpoint is designed to be called at ~15 FPS per camera.  It NEVER
+    blocks waiting for a frame — it reads whatever the background CameraStream
+    thread has already processed and returns it immediately.  Heavy work (YOLO,
+    ByteTrack, face recognition) happens exclusively in the background thread.
+    """
+    camera = get_connected_camera(camera_id)
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found.")
+
+    rtsp_url = (camera.get("rtsp_url") or "").strip()
+    if not rtsp_url:
+        raise HTTPException(status_code=400, detail="Camera stream URL not available.")
+
+    enable_person_count = "person_count" in normalize_use_cases(camera.get("use_cases"))
+    enable_person_recognition = "person_recognition" in normalize_use_cases(camera.get("use_cases"))
+
+    # Ensure the background stream thread is running, then grab the latest
+    # already-processed frame.  _ensure_camera_stream holds the lock for only
+    # a dict-lookup's worth of time so this never meaningfully blocks the loop.
+    stream = _ensure_camera_stream(camera_id, rtsp_url, enable_person_count, enable_person_recognition)
+    frame = stream.get_processed_frame_copy()
+    if frame is None:
+        raise HTTPException(status_code=503, detail="No frame available yet.")
+
+    # JPEG encode in a thread so we don't block the event loop.
+    frame_for_encode = frame  # capture for lambda closure
+    ok, buffer = await asyncio.to_thread(
+        lambda: cv2.imencode(".jpg", frame_for_encode, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to encode frame.")
+
+    return Response(
+        content=bytes(buffer),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store, no-cache", "Pragma": "no-cache"},
     )
 
 

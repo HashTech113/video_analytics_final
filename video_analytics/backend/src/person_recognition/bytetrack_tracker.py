@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import inspect
 import numpy as np
 
 from .face_tracker import FaceTracker
@@ -40,13 +41,34 @@ class ByteTrackFaceTracker:
             return
 
         self._sv = sv
-        self._tracker = sv.ByteTrack(
-            track_activation_threshold=track_thresh,
-            lost_track_buffer=track_buffer,
-            minimum_matching_threshold=match_thresh,
-            frame_rate=frame_rate,
-        )
-        print("ByteTrack initialized successfully")
+        try:
+            # Handle supervision ByteTrack constructor changes across versions.
+            signature = inspect.signature(sv.ByteTrack.__init__)
+            params = signature.parameters
+            kwargs = {}
+            if "track_activation_threshold" in params:
+                kwargs["track_activation_threshold"] = track_thresh
+            elif "track_thresh" in params:
+                kwargs["track_thresh"] = track_thresh
+
+            if "lost_track_buffer" in params:
+                kwargs["lost_track_buffer"] = track_buffer
+            elif "track_buffer" in params:
+                kwargs["track_buffer"] = track_buffer
+
+            if "minimum_matching_threshold" in params:
+                kwargs["minimum_matching_threshold"] = match_thresh
+            elif "match_thresh" in params:
+                kwargs["match_thresh"] = match_thresh
+
+            if "frame_rate" in params:
+                kwargs["frame_rate"] = frame_rate
+
+            self._tracker = sv.ByteTrack(**kwargs)
+            print("ByteTrack initialized successfully")
+        except Exception as e:
+            self._tracker = None
+            print(f"ByteTrack init failed, falling back to FaceTracker: {e}")
 
     def update(self, detections, scores=None):
         if self._tracker is None or self._sv is None:

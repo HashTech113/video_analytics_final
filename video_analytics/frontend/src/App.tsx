@@ -33,13 +33,13 @@ function MountedPage({
 
 function PersistentRouteShell() {
   const { pathname } = useLocation();
-  const isUpload = pathname === "/" || pathname === "/upload";
-  const isLiveStream = pathname === "/live-stream";
-  const isProcessedVideos = pathname === "/processed-video" || pathname === "/processed-video/processed-videos";
-  const isLivePreviews = pathname === "/live-previews" || pathname === "/live-preivews";
-  const isData = pathname === "/data";
-  const isAnalytics = pathname === "/analytics";
-
+  const normalizedPath = pathname.endsWith("/") && pathname !== "/" ? pathname.slice(0, -1) : pathname;
+  const isUpload = normalizedPath === "/" || normalizedPath === "/upload";
+  const isLiveStream = normalizedPath === "/live-stream";
+  const isProcessedVideos = normalizedPath === "/processed-video" || normalizedPath === "/processed-video/processed-videos";
+  const isLivePreviews = normalizedPath === "/live-previews" || normalizedPath === "/live-preivews";
+  const isData = normalizedPath === "/data";
+  const isAnalytics = normalizedPath === "/analytics";
   const isKnownPath = (
     isUpload
     || isLiveStream
@@ -69,9 +69,7 @@ function PersistentRouteShell() {
       <MountedPage active={isAnalytics}>
         <Dashboard />
       </MountedPage>
-      <MountedPage active={!isKnownPath}>
-        <NotFound />
-      </MountedPage>
+{!isKnownPath ? <NotFound /> : null}
     </DashboardLayout>
   );
 }
@@ -81,7 +79,12 @@ const App = () => (
     <TooltipProvider>
       <Toaster />
       <Sonner />
-      <BrowserRouter>
+      <BrowserRouter
+        future={{
+          v7_startTransition: true,
+          v7_relativeSplatPath: true,
+        }}
+      >
         <PersistentRouteShell />
       </BrowserRouter>
     </TooltipProvider>
