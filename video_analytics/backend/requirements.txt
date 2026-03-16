@@ -9,3 +9,4 @@ av
 insightface
 onnxruntime
 supervision==0.18.0
+psycopg2-binary

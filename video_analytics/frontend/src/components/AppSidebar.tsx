@@ -1,4 +1,4 @@
-import { BarChart3, Film, Plus, RadioTower, Upload } from "lucide-react";
+import { BarChart3, Film, Plus, RadioTower, Upload, UserCheck } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
 import type { ComponentType } from "react";
@@ -26,7 +26,8 @@ const navItems: NavItem[] = [
     ],
   },
   { title: "Live Streams", url: "/live-previews", icon: RadioTower },
-{ title: "Analytics", url: "/analytics", icon: BarChart3 },
+  { title: "Person Activity", url: "/person-activity", icon: UserCheck },
+  { title: "Analytics", url: "/analytics", icon: BarChart3 },
 ];
 
 

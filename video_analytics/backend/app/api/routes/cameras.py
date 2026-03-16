@@ -319,8 +319,8 @@ class CameraFrameProcessor:
             self.counter.cleanup(now)
 
             annotated = frame.copy()
-            self._draw_person_tracks(annotated)
-            self._draw_face_tracks(annotated, now)
+            self._draw_person_tracks(annotated, now, enable_person_recognition)
+            self._clear_stale_face_tracks(now)
 
             metrics: list[tuple[str, int]] = []
             if enable_person_count:
@@ -416,57 +416,102 @@ class CameraFrameProcessor:
             return
         self.last_person_count = len(self.person_tracks)
 
-    def _draw_person_tracks(self, frame):
-        seen_ids: set[int] = set()
-        for track in self.person_tracks:
-            bbox = getattr(track, "bbox", None)
-            track_id = getattr(track, "track_id", None)
-            if bbox is None or len(bbox) != 4:
+    def _face_label_for_person(self, person_bbox: list) -> str | None:
+        """
+        Find a face recognition result whose face centre lies inside the
+        person bounding box.  Returns the label to show, or None if no
+        face match is found.
+
+        Label rules:
+          - Known person  →  name as recognised  (e.g. "Akash")
+          - Unknown face  →  "Unknown_<face_track_id>"
+        """
+        if not self.face_tracks:
+            return None
+
+        px1, py1, px2, py2 = map(int, person_bbox)
+
+        for face in self.face_tracks:
+            fbbox = face.get("bbox")
+            if not fbbox or len(fbbox) != 4:
                 continue
-            if track_id is not None:
-                track_id = int(track_id)
-                if track_id in seen_ids:
+            fx1, fy1, fx2, fy2 = map(int, fbbox)
+            face_cx = (fx1 + fx2) // 2
+            face_cy = (fy1 + fy2) // 2
+
+            if px1 <= face_cx <= px2 and py1 <= face_cy <= py2:
+                name = str(face.get("name", "")).strip()
+                face_id = face.get("id")
+                if name and name.lower() != "unknown":
+                    return name
+                return f"Unknown_{face_id}" if face_id is not None else "Unknown"
+
+        return None
+
+    def _draw_person_tracks(self, frame, now: float, enable_person_recognition: bool = False):
+        """
+        Draw green bounding boxes for every tracked person.
+
+        When face recognition is active:
+          - Known person  → name (e.g. "Akash")
+          - Unknown face  → "Unknown_<face_track_id>"
+          - No face match → "Person <track_id>"
+
+        When only person_recognition is enabled (no YOLO person tracks),
+        face detection boxes are drawn directly so detections are still visible.
+        """
+        face_tracks_fresh = (
+            enable_person_recognition
+            and (now - self.last_face_tracks_at) <= self.max_face_track_stale_seconds
+        )
+
+        # --- Case: person_count tracks available (normal path) ---
+        if self.person_tracks:
+            seen_ids: set[int] = set()
+            for track in self.person_tracks:
+                bbox = getattr(track, "bbox", None)
+                track_id = getattr(track, "track_id", None)
+                if bbox is None or len(bbox) != 4:
                     continue
-                seen_ids.add(track_id)
-            x1, y1, x2, y2 = map(int, bbox)
-            label = f"Person ID:{track_id}" if track_id is not None else "Person"
+                if track_id is not None:
+                    track_id = int(track_id)
+                    if track_id in seen_ids:
+                        continue
+                    seen_ids.add(track_id)
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(
-                frame,
-                label,
-                (x1, max(y1 - 8, 0)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (0, 255, 0),
-                2,
-            )
+                x1, y1, x2, y2 = map(int, bbox)
 
-    def _draw_face_tracks(self, frame, now: float):
-        if (now - self.last_face_tracks_at) > self.max_face_track_stale_seconds:
-            self.face_tracks = []
+                if face_tracks_fresh:
+                    label = self._face_label_for_person(bbox) or f"Person {track_id}"
+                else:
+                    label = f"Person {track_id}" if track_id is not None else "Person"
+
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 230, 0), 2)
+                _draw_label(frame, label, x1, max(y1 - 2, 18))
             return
 
-        for result in self.face_tracks:
-            bbox = result.get("bbox")
-            if not bbox or len(bbox) != 4:
-                continue
+        # --- Case: no YOLO person tracks but face recognition is active ---
+        # Draw face bboxes directly so the user still sees detections.
+        if face_tracks_fresh and self.face_tracks:
+            for face in self.face_tracks:
+                fbbox = face.get("bbox")
+                if not fbbox or len(fbbox) != 4:
+                    continue
+                name = str(face.get("name", "")).strip()
+                face_id = face.get("id")
+                if name and name.lower() != "unknown":
+                    label = name
+                else:
+                    label = f"Unknown_{face_id}" if face_id is not None else "Unknown"
 
-            x1, y1, x2, y2 = map(int, bbox)
-            identity = str(result.get("name", "Unknown")).strip() or "Unknown"
-            track_id = result.get("id")
-            label = f"{identity} ID:{track_id}" if track_id is not None else identity
+                x1, y1, x2, y2 = map(int, fbbox)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 230, 0), 2)
+                _draw_label(frame, label, x1, max(y1 - 2, 18))
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 200, 255), 2)
-            cv2.putText(
-                frame,
-                label,
-                (x1, max(y1 - 8, 0)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 200, 255),
-                2,
-            )
+    def _clear_stale_face_tracks(self, now: float):
+        """Clear face_tracks when they have gone stale (replaces _draw_face_tracks)."""
+        if (now - self.last_face_tracks_at) > self.max_face_track_stale_seconds:
+            self.face_tracks = []
 
 
 def _ensure_camera_stream(
@@ -635,25 +680,50 @@ def _run_person_recognition(frame):
     return known, unknown, results
 
 
+def _draw_label(frame, text: str, x: int, y: int,
+                font_scale: float = 0.55, thickness: int = 1,
+                text_color=(255, 255, 255), bg_color=(0, 0, 0)):
+    """Draw text with a solid filled background for maximum readability."""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    pad = 3
+    # Clamp so the box never goes above the frame top
+    top = max(0, y - th - pad)
+    cv2.rectangle(frame, (x, top), (x + tw + pad * 2, y + baseline), bg_color, -1)
+    cv2.putText(frame, text, (x + pad, y), font, font_scale, text_color, thickness,
+                cv2.LINE_AA)
+
+
 def _draw_top_right_metrics(frame, metrics: list[tuple[str, int]]):
     if not metrics:
         return
 
-    margin_right = 8
-    start_y = 22
-    line_gap = 26
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.7
-    thickness = 2
-    color = (0, 255, 0)
+    font_scale = 0.65
+    thickness = 1
+    pad = 6          # inner horizontal padding for each pill
+    row_gap = 6      # vertical gap between rows
     width = frame.shape[1]
 
-    for index, (label, value) in enumerate(metrics):
-        text = f"{label} - {max(int(value), 0)}"
-        (text_width, _), _ = cv2.getTextSize(text, font, font_scale, thickness)
-        x = max(10, width - text_width - margin_right)
-        y = start_y + (index * line_gap)
-        cv2.putText(frame, text, (x, y), font, font_scale, color, thickness)
+    # Pre-measure all rows so we can right-align the pills consistently
+    rows = []
+    for label, value in metrics:
+        text = f"{label}  {max(int(value), 0)}"
+        (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        rows.append((text, tw, th, baseline))
+
+    y = 10
+    for text, tw, th, baseline in rows:
+        pill_w = tw + pad * 2
+        pill_h = th + baseline + pad * 2
+        x = width - pill_w - 8          # 8 px from right edge
+        # Dark background pill
+        cv2.rectangle(frame, (x, y), (x + pill_w, y + pill_h), (20, 20, 20), -1)
+        cv2.rectangle(frame, (x, y), (x + pill_w, y + pill_h), (0, 200, 0), 1)
+        # Bright green text
+        cv2.putText(frame, text, (x + pad, y + th + pad - 1),
+                    font, font_scale, (0, 230, 0), thickness, cv2.LINE_AA)
+        y += pill_h + row_gap
 
 
 def _annotate_frame_for_camera(

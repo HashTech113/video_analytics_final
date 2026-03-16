@@ -10,6 +10,7 @@ import LiveStream from "./pages/LiveStream";
 import ProcessedVideoPage from "./pages/ProcessedVideo";
 import LivePreviewsPage from "./pages/LivePreviews";
 import DataPage from "./pages/Data";
+import PersonActivityPage from "./pages/PersonActivity";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -40,6 +41,7 @@ function PersistentRouteShell() {
   const isLivePreviews = normalizedPath === "/live-previews" || normalizedPath === "/live-preivews";
   const isData = normalizedPath === "/data";
   const isAnalytics = normalizedPath === "/analytics";
+  const isPersonActivity = normalizedPath === "/person-activity";
   const isKnownPath = (
     isUpload
     || isLiveStream
@@ -47,6 +49,7 @@ function PersistentRouteShell() {
     || isLivePreviews
     || isData
     || isAnalytics
+    || isPersonActivity
   );
 
   return (
@@ -69,7 +72,10 @@ function PersistentRouteShell() {
       <MountedPage active={isAnalytics}>
         <Dashboard />
       </MountedPage>
-{!isKnownPath ? <NotFound /> : null}
+      <MountedPage active={isPersonActivity}>
+        <PersonActivityPage />
+      </MountedPage>
+      {!isKnownPath ? <NotFound /> : null}
     </DashboardLayout>
   );
 }
