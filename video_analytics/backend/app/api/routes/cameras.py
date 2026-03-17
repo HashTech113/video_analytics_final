@@ -237,7 +237,7 @@ class CameraFrameProcessor:
         self.last_known_count = 0
         self.last_unknown_count = 0
         self.face_tracks = []
-        self.last_face_tracks_at = 0.0
+        self.last_face_tracks_at = monotonic()
         self.max_face_track_stale_seconds = 10.0
         self.started_at = datetime.utcnow()
         self.last_store_update_at = 0.0
@@ -301,7 +301,7 @@ class CameraFrameProcessor:
                             self.last_face_tracks_at = now
 
                     # Fire a new recognition job if none is running and it is time
-                    if not self._recog_running and self.frame_index % self.face_recognition_stride == 0:
+                    if not self._recog_running and (self.frame_index == 1 or self.frame_index % self.face_recognition_stride == 0):
                         self._recog_running = True
                         Thread(
                             target=self._recognition_worker,
@@ -471,6 +471,33 @@ class CameraFrameProcessor:
                 dist = abs(face_cx - person_cx)
                 if dist < best_dist:
                     best_dist = dist
+                    name = str(face.get("name", "")).strip()
+                    face_id = face.get("id")
+                    if name and name.lower() != "unknown":
+                        best_label = name
+                    else:
+                        best_label = f"Unknown_{face_id}" if face_id is not None else "Unknown"
+
+        # Fallback: if strict spatial check found nothing, find the nearest face
+        # by Euclidean centre distance.  This handles temporal offsets between
+        # the YOLO detection frame and the recognition frame (the person may have
+        # moved slightly between the two asynchronous runs).
+        if best_label is None:
+            person_cy = (py1 + py2) // 2
+            person_w = max(1, px2 - px1)
+            nearest_dist = float("inf")
+            for face in self.face_tracks:
+                fbbox = face.get("bbox")
+                if not fbbox or len(fbbox) != 4:
+                    continue
+                fx1, fy1, fx2, fy2 = map(int, fbbox)
+                face_cx = (fx1 + fx2) // 2
+                face_cy = (fy1 + fy2) // 2
+                dx = face_cx - person_cx
+                dy = face_cy - person_cy
+                dist = (dx * dx + dy * dy) ** 0.5
+                if dist < nearest_dist and dist < person_w * 2.0:
+                    nearest_dist = dist
                     name = str(face.get("name", "")).strip()
                     face_id = face.get("id")
                     if name and name.lower() != "unknown":
